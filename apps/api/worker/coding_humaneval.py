@@ -15,6 +15,9 @@ API_KEY = os.getenv("ANTHROPIC_API_KEY")
 PRICE_IN = float(os.getenv("ANTHROPIC_PRICE_INPUT_PER_MTOK", "0"))
 PRICE_OUT = float(os.getenv("ANTHROPIC_PRICE_OUTPUT_PER_MTOK", "0"))
 API_URL = os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
+RETRIABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 521, 522, 523, 524, 525, 526, 527, 529}
+MAX_RETRIES = max(1, int(os.getenv("ANTHROPIC_MAX_RETRIES", "5")))
+BACKOFF_BASE_SECONDS = max(0.1, float(os.getenv("ANTHROPIC_BACKOFF_BASE", "1.0")))
 
 SYSTEM_INSTRUCT = (
     "You are a careful coding assistant. Complete the Python function as requested. "
@@ -113,10 +116,45 @@ def run_humaneval_subset(n: int = 25, seed: int = 1234, temperature: float = 0.0
             "max_tokens": max_tokens,
             "temperature": temperature,
             "system": SYSTEM_INSTRUCT,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": USER_TEMPLATE.format(prompt=prompt)}]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": USER_TEMPLATE.format(prompt=prompt)}
+                    ],
+                }
+            ],
         }
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=90)
-        resp.raise_for_status()
+
+        resp = None
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = requests.post(API_URL, headers=headers, json=payload, timeout=90)
+                resp.raise_for_status()
+                last_exc = None
+                break
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                last_exc = exc
+                if status in RETRIABLE_STATUS and attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE_SECONDS * (2 ** attempt) + rng.random() * 0.5
+                    time.sleep(delay)
+                    continue
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE_SECONDS * (2 ** attempt) + rng.random() * 0.5
+                    time.sleep(delay)
+                    continue
+                break
+
+        if last_exc is not None and (resp is None or resp.status_code >= 400):
+            raise last_exc
+        if resp is None:
+            raise RuntimeError("Anthropic request failed without response")
+
         dt = time.time() - t0
         latencies.append(dt)
         data = resp.json()

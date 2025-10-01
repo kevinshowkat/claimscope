@@ -2,18 +2,25 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine, text
 
 from .agents_cagent import run_cagent_suite
 from .coding_humaneval import run_humaneval_subset
+from .gui_cgui import run_cgui_suite
 from .logging_utils import get_logger
 from .reasoning_gsm8k import bootstrap_ci, run_gsm8k_subset
+from .trace_manifest import record_trace
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/claimscope")
 engine = create_engine(DATABASE_URL, future=True)
 logger = get_logger("worker")
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+HUMANEVAL_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "coding_humaneval.py"]
+GSM8K_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "reasoning_gsm8k.py"]
 
 ESTIMATED_LLM_COSTS: Dict[str, float] = {
     "coding": 0.02,
@@ -61,6 +68,46 @@ ARTIFACTS: Dict[str, Dict[str, Any]] = {
     "computer-use": {"name": "playwright_trace.zip", "url": "http://localhost:3000/demo/artifacts/playwright_trace.zip", "sha256": "demo", "bytes": 256, "content_type": "application/zip"},
     "reasoning-math": {"name": "logs.txt", "url": "http://localhost:3000/demo/artifacts/logs.txt", "sha256": "demo", "bytes": 64, "content_type": "text/plain"},
 }
+
+
+def _status_from_exception(exc: Exception) -> Optional[int]:
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            return int(status)
+        except (TypeError, ValueError):
+            return None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        return getattr(response, "status_code", None)
+    return None
+
+
+def _record_failure(
+    conn,
+    run_id: str,
+    trace_id: str,
+    *,
+    reason: str,
+    message: str,
+    extra: Optional[Dict[str, Any]] = None,
+    status_label: str = "Failed",
+) -> None:
+    payload = {"reason": reason, "message": message}
+    if extra:
+        payload.update(extra)
+    conn.execute(
+        text(
+            "UPDATE runs SET status='failed', trace_id=:trace_id, diffs=CAST(:diffs AS JSONB), status_label=:label WHERE id=:id"
+        ),
+        {
+            "id": run_id,
+            "trace_id": trace_id,
+            "label": status_label,
+            "diffs": json.dumps([payload]),
+        },
+    )
+    conn.commit()
 
 def _coerce_budget(model_cfg: Dict[str, Any]) -> float:
     raw = model_cfg.get("budget_usd", 0.0)
@@ -185,15 +232,35 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "trace_id": trace_id,
                     },
                 )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="python -m worker.reasoning_gsm8k",
+                    harness_paths=GSM8K_PATHS,
+                    dataset_id="gsm8k@subset-25",
+                    params={"n": n, "temperature": 0.2, "budget_usd": budget},
+                    seeds={"sample_seed": 1234},
+                    tokens_prompt=int(res["ops"].get("tokens_prompt") or 0),
+                    tokens_output=int(res["ops"].get("tokens_output") or 0),
+                    latencies=lats,
+                    cost_usd=float(res["ops"].get("cost_usd", 0.0)),
+                )
                 conn.commit()
                 return
             except Exception as e:
                 logger.exception("GSM8K runner error for %s", run_id)
-                conn.execute(
-                    text("UPDATE runs SET status='failed', trace_id=:t WHERE id=:id"),
-                    {"id": run_id, "t": trace_id},
+                status = _status_from_exception(e)
+                reason = "anthropic_overloaded" if status == 529 else "anthropic_error"
+                extra = {"status_code": status} if status else {}
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason=reason,
+                    message=str(e),
+                    extra=extra if extra else None,
+                    status_label="Failed",
                 )
-                conn.commit()
                 return
 
         # Real HumanEval (coding)
@@ -228,20 +295,40 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "trace_id": trace_id,
                     },
                 )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="python -m worker.coding_humaneval",
+                    harness_paths=HUMANEVAL_PATHS,
+                    dataset_id="openai/humaneval",
+                    params={"n": n, "temperature": 0.0, "max_tokens": 1024, "budget_usd": budget},
+                    seeds={"sample_seed": 1234},
+                    tokens_prompt=int(res["ops"].get("tokens_prompt") or 0),
+                    tokens_output=int(res["ops"].get("tokens_output") or 0),
+                    latencies=lats,
+                    cost_usd=float(res["ops"].get("cost_usd", 0.0)),
+                )
                 conn.commit()
                 return
             except Exception as e:
                 logger.exception("HumanEval runner error for %s", run_id)
-                conn.execute(
-                    text("UPDATE runs SET status='failed', trace_id=:t WHERE id=:id"),
-                    {"id": run_id, "t": trace_id},
+                status = _status_from_exception(e)
+                reason = "anthropic_overloaded" if status == 529 else "anthropic_error"
+                extra = {"status_code": status} if status else {}
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason=reason,
+                    message=str(e),
+                    extra=extra if extra else None,
+                    status_label="Failed",
                 )
-                conn.commit()
                 return
 
         if domain == "agents" and task.lower().startswith("cagent"):
             try:
-                res, durations, artifact = run_cagent_suite()
+                res, durations, artifact, metadata = run_cagent_suite()
                 conn.execute(
                     text(
                         """
@@ -266,32 +353,121 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "trace_id": trace_id,
                     },
                 )
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO artifacts (id, run_id, name, url, sha256, bytes, content_type)
-                        VALUES (:id, :run_id, :name, :url, :sha256, :bytes, :content_type)
-                        """
-                    ),
-                    {
-                        "id": f"art_{uuid.uuid4().hex[:8]}",
-                        "run_id": run_id,
-                        "name": artifact["name"],
-                        "url": artifact["data_url"],
-                        "sha256": artifact.get("sha256"),
-                        "bytes": artifact.get("bytes"),
-                        "content_type": artifact.get("content_type"),
-                    },
+                if artifact:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO artifacts (id, run_id, name, url, sha256, bytes, content_type)
+                            VALUES (:id, :run_id, :name, :url, :sha256, :bytes, :content_type)
+                            """
+                        ),
+                        {
+                            "id": f"art_{uuid.uuid4().hex[:8]}",
+                            "run_id": run_id,
+                            "name": artifact["name"],
+                            "url": artifact["data_url"],
+                            "sha256": artifact.get("sha256"),
+                            "bytes": artifact.get("bytes"),
+                            "content_type": artifact.get("content_type"),
+                        },
+                    )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="python -m worker.agents_cagent",
+                    harness_digest=metadata.get("harness_hash"),
+                    dataset_id=metadata.get("dataset_id"),
+                    dataset_digest=metadata.get("dataset_hash"),
+                    params={**metadata.get("params", {}), "budget_usd": budget},
+                    seeds=metadata.get("seeds"),
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    latencies=[d / 1000.0 for d in durations],
+                    cost_usd=0.0,
                 )
                 conn.commit()
                 return
-            except Exception:
+            except Exception as exc:
                 logger.exception("cAgent suite error for %s", run_id)
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="harness_error",
+                    message=str(exc),
+                )
+                return
+
+        if domain == "computer-use" and task.lower().startswith("cgui"):
+            try:
+                res, durations, artifact, metadata = run_cgui_suite()
                 conn.execute(
-                    text("UPDATE runs SET status='failed', trace_id=:t WHERE id=:id"),
-                    {"id": run_id, "t": trace_id},
+                    text(
+                        """
+                        UPDATE runs
+                        SET status=:status,
+                            score_value=:score_value,
+                            ops=CAST(:ops AS JSONB),
+                            diffs=CAST(:diffs AS JSONB),
+                            status_label=:status_label,
+                            trace_id=:trace_id,
+                            completed_at=now()
+                        WHERE id=:id
+                        """
+                    ),
+                    {
+                        "id": run_id,
+                        "status": "succeeded",
+                        "score_value": res["score_value"],
+                        "ops": json.dumps(res["ops"]),
+                        "diffs": json.dumps([{"metrics": res["metrics"]}]),
+                        "status_label": "Replicated",
+                        "trace_id": trace_id,
+                    },
+                )
+                if artifact:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO artifacts (id, run_id, name, url, sha256, bytes, content_type)
+                            VALUES (:id, :run_id, :name, :url, :sha256, :bytes, :content_type)
+                            """
+                        ),
+                        {
+                            "id": f"art_{uuid.uuid4().hex[:8]}",
+                            "run_id": run_id,
+                            "name": artifact["name"],
+                            "url": artifact["data_url"],
+                            "sha256": artifact.get("sha256"),
+                            "bytes": artifact.get("bytes"),
+                            "content_type": artifact.get("content_type"),
+                        },
+                    )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="python -m worker.gui_cgui",
+                    harness_digest=metadata.get("harness_hash"),
+                    dataset_id=metadata.get("dataset_id"),
+                    dataset_digest=metadata.get("dataset_hash"),
+                    params={**metadata.get("params", {}), "budget_usd": budget},
+                    seeds=metadata.get("seeds"),
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    latencies=durations,
+                    cost_usd=0.0,
                 )
                 conn.commit()
+                return
+            except Exception as exc:
+                logger.exception("cGUI suite error for %s", run_id)
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="harness_error",
+                    message=str(exc),
+                )
                 return
 
         # Fallback to seeded paths for other domains
@@ -335,6 +511,17 @@ def process_one(run_id: str, claim_id: str) -> None:
                 "bytes": art["bytes"],
                 "content_type": art["content_type"],
             },
+        )
+        record_trace(
+            conn,
+            run_id,
+            harness_cmd=f"seeded::{domain}",
+            dataset_id=f"seeded::{domain}",
+            params={"domain": domain, "task": task, "budget_usd": budget},
+            seeds={"mode": "seeded"},
+            tokens_prompt=int(seed["ops"].get("tokens_prompt") or 0),
+            tokens_output=int(seed["ops"].get("tokens_output") or 0),
+            cost_usd=float(seed["ops"].get("cost_usd") or 0.0),
         )
         conn.commit()
 

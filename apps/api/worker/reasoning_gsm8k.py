@@ -4,12 +4,16 @@ import random
 import json
 from typing import Any, Dict, List, Tuple
 from datasets import load_dataset
+import anthropic
 from anthropic import Anthropic
 
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
 API_KEY = os.getenv("ANTHROPIC_API_KEY")
 PRICE_IN = float(os.getenv("ANTHROPIC_PRICE_INPUT_PER_MTOK", "0"))
 PRICE_OUT = float(os.getenv("ANTHROPIC_PRICE_OUTPUT_PER_MTOK", "0"))
+RETRIABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 521, 522, 523, 524, 525, 526, 527, 529}
+MAX_RETRIES = max(1, int(os.getenv("ANTHROPIC_MAX_RETRIES", "5")))
+BACKOFF_BASE_SECONDS = max(0.1, float(os.getenv("ANTHROPIC_BACKOFF_BASE", "1.0")))
 
 PROMPT_TEMPLATE = (
     "You are a careful mathematician. Solve the following problem. "
@@ -45,12 +49,41 @@ def run_gsm8k_subset(n: int = 25, seed: int = 1234, temperature: float = 0.2, sh
         gold = test[i]["answer"]
         prompt = PROMPT_TEMPLATE.format(question=q)
         t0 = time.time()
-        msg = client.messages.create(
-            model=DEFAULT_MODEL,
-            max_tokens=512,
-            temperature=temperature,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        msg = None
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                msg = client.messages.create(
+                    model=DEFAULT_MODEL,
+                    max_tokens=512,
+                    temperature=temperature,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                last_exc = None
+                break
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                if status is None and hasattr(exc, "response"):
+                    status = getattr(getattr(exc, "response"), "status_code", None)
+                retriable_candidates = [
+                    getattr(anthropic, "RateLimitError", None),
+                    getattr(anthropic, "APIConnectionError", None),
+                    getattr(anthropic, "ServiceUnavailableError", None),
+                    getattr(anthropic, "InternalServerError", None),
+                    getattr(anthropic, "OverloadedError", None),
+                ]
+                retriable_types = tuple(t for t in retriable_candidates if isinstance(t, type)) or tuple()
+                retriable = status in RETRIABLE_STATUS or isinstance(exc, retriable_types)
+                last_exc = exc
+                if retriable and attempt < MAX_RETRIES - 1:
+                    delay = BACKOFF_BASE_SECONDS * (2 ** attempt) + rng.random() * 0.5
+                    time.sleep(delay)
+                    continue
+                raise
+
+        if msg is None:
+            raise RuntimeError("Anthropic call failed without response") from last_exc
+
         dt = time.time() - t0
         latencies.append(dt)
         text = "".join([blk.text for blk in msg.content if getattr(blk, "type", "text") == "text"]) if hasattr(msg, "content") else str(msg)

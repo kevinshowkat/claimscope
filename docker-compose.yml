@@ -6,15 +6,26 @@ services:
     env_file: .env
     depends_on: [api, db, redis]
   api:
-    build: ./apps/api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     ports: ["8000:8000"]
     env_file: .env
     depends_on: [db, redis, minio]
   worker:
-    build: ./apps/api
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
     command: ["python", "-m", "worker.main"]
     env_file: .env
     depends_on: [api, db, redis, minio]
+  gui:
+    image: mcr.microsoft.com/playwright:v1.47.1-jammy
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    entrypoint: ["tail", "-f", "/dev/null"]
+    depends_on: [web]
   db:
     image: postgres:16
     environment:
