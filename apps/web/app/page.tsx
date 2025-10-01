@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Receipt, RunStatus } from "../components/Receipt";
 
@@ -34,14 +34,20 @@ type StatusVisual = {
   text: string;
 };
 
+type Verdict = "likely_exaggerated" | "likely_true" | "no_evidence" | "true_replicated";
+
 type Segment = {
   id: string;
   text: string;
+  start: number | null;
+  end: number | null;
+  status: RunStatus["status"] | "idle";
+  verdict: Verdict;
 };
 
 const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
   idle: {
-    label: "Not started",
+    label: "Awaiting run",
     background: "#11161C",
     border: "#1D2633",
     chipBg: "#1D2633",
@@ -65,7 +71,7 @@ const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
     text: "#E6EDF3",
   },
   succeeded: {
-    label: "Valid",
+    label: "True / replicated",
     background: "#10291A",
     border: "#1F4D30",
     chipBg: "#2EA043",
@@ -73,7 +79,7 @@ const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
     text: "#E6EDF3",
   },
   failed: {
-    label: "Invalid",
+    label: "Likely exaggerated",
     background: "#331820",
     border: "#5B202F",
     chipBg: "#F85149",
@@ -82,15 +88,95 @@ const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
   },
 };
 
+const VERDICT_META: Record<Verdict, StatusVisual> = {
+  likely_exaggerated: {
+    label: "Likely exaggerated",
+    background: "#331820",
+    border: "#5B202F",
+    chipBg: "#F85149",
+    chipText: "#FEE2E2",
+    text: "#FBE6E6",
+  },
+  likely_true: {
+    label: "Likely true",
+    background: "#241C0F",
+    border: "#3B2D15",
+    chipBg: "#F59E0B",
+    chipText: "#1F2937",
+    text: "#FDE68A",
+  },
+  no_evidence: {
+    label: "No evidence of accuracy",
+    background: "#11161E",
+    border: "#1F2734",
+    chipBg: "#4B5563",
+    chipText: "#E5E7EB",
+    text: "#D1D5DB",
+  },
+  true_replicated: {
+    label: "True / replicated",
+    background: "#10291A",
+    border: "#1F4D30",
+    chipBg: "#2EA043",
+    chipText: "#E9F6ED",
+    text: "#E6EDF3",
+  },
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const sanitized = hex.replace(/^#/, "");
+  const normalized = sanitized.length === 3
+    ? sanitized
+        .split("")
+        .map((char) => char + char)
+        .join("")
+    : sanitized;
+
+  if (normalized.length !== 6) {
+    return `rgba(255, 255, 255, ${alpha})`;
+  }
+
+  const value = Number.parseInt(normalized, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function findSegmentRange(raw: string, fragment: string, fromIndex: number): { start: number; end: number } | null {
+  if (!fragment.trim()) return null;
+
+  const normalizedPattern = escapeRegExp(fragment).replace(/\s+/g, "\\s+");
+  const forward = new RegExp(normalizedPattern, "gi");
+  forward.lastIndex = fromIndex;
+
+  const forwardMatch = forward.exec(raw);
+  if (forwardMatch) {
+    return { start: forwardMatch.index, end: forwardMatch.index + forwardMatch[0].length };
+  }
+
+  const fallback = new RegExp(normalizedPattern, "gi");
+  const fallbackMatch = fallback.exec(raw);
+  if (fallbackMatch) {
+    return { start: fallbackMatch.index, end: fallbackMatch.index + fallbackMatch[0].length };
+  }
+
+  return null;
+}
+
 function extractSegments(raw: string, claims: Claim[]): Segment[] {
-  const trimmed = raw.replace(/\s+/g, " ").trim();
+  const compact = raw.replace(/\s+/g, " ").trim();
 
   const lineCandidates = raw
     .split(/\n+/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-  const sentenceCandidates = (trimmed.match(/[^.!?\n]+[.!?]?/g) ?? [])
+  const sentenceCandidates = (compact.match(/[^.!?\n]+[.!?]?/g) ?? [])
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0);
 
@@ -100,65 +186,97 @@ function extractSegments(raw: string, claims: Claim[]): Segment[] {
       ? sentenceCandidates
       : lineCandidates.length > 0
         ? lineCandidates
-        : [trimmed];
+        : compact
+          ? [compact]
+          : [];
 
-  return claims.map((claim, index) => ({
-    id: claim.id,
-    text: candidates[index] ?? candidates[candidates.length - 1] ?? `${claim.domain} / ${claim.task}`,
-  }));
+  let cursor = 0;
+
+  return claims.map((claim, index) => {
+    const candidate = candidates[index] ?? candidates[candidates.length - 1] ?? `${claim.domain} / ${claim.task}`;
+    const match = findSegmentRange(raw, candidate, cursor);
+
+    if (match) {
+      cursor = match.end;
+      return {
+        id: claim.id,
+        text: candidate,
+        start: match.start,
+        end: match.end,
+        status: "idle",
+        verdict: "no_evidence",
+      };
+    }
+
+    return {
+      id: claim.id,
+      text: candidate,
+      start: null,
+      end: null,
+      status: "idle",
+      verdict: "no_evidence",
+    };
+  });
 }
 
-function MetricsHover({ status }: { status: RunStatus }) {
-  const metaKey: RunStatus["status"] | "idle" = status.status ?? "idle";
-  const meta = STATUS_META[metaKey];
-  const metrics: Array<[string, string]> = [];
+function resolveVerdict(claim: Claim | undefined, status: RunStatus | undefined): Verdict {
+  const defaultVerdict: Verdict = "no_evidence";
+  if (!status || !status.status) return defaultVerdict;
 
-  if (status.scores) {
-    metrics.push([status.scores.metric, status.scores.value.toFixed(2)]);
+  switch (status.status) {
+    case "queued":
+      return "no_evidence";
+    case "running":
+      return "likely_true";
+    case "succeeded": {
+      const value = status.scores?.value;
+      const reference = typeof claim?.reference_score === "number" ? claim.reference_score : undefined;
+      if (typeof value === "number" && typeof reference === "number") {
+        if (value >= reference) return "true_replicated";
+        if (value >= reference * 0.75) return "likely_true";
+        return "likely_exaggerated";
+      }
+      return "true_replicated";
+    }
+    case "failed": {
+      const diffText = JSON.stringify(status.diffs ?? []).toLowerCase();
+      if (
+        diffText.includes("no evidence") ||
+        diffText.includes("not found") ||
+        diffText.includes("missing") ||
+        diffText.includes("unavailable")
+      ) {
+        return "no_evidence";
+      }
+      return "likely_exaggerated";
+    }
+    default:
+      return defaultVerdict;
+  }
+}
+
+function verdictSummary(verdict: Verdict, statusKey: RunStatus["status"] | "idle") {
+  if (statusKey === "running") {
+    return { text: "Running tests...", tone: "indigo" as const };
+  }
+  if (statusKey === "queued") {
+    return { text: "Queued for execution", tone: "muted" as const };
+  }
+  if (statusKey === "idle") {
+    return { text: "No evidence yet — run validation.", tone: "muted" as const };
   }
 
-  if (status.ops) {
-    const { p95_latency_s, tokens_prompt, tokens_output, cost_usd } = status.ops;
-    if (p95_latency_s) metrics.push(["p95 latency", `${p95_latency_s}s`]);
-    if (tokens_prompt) metrics.push(["tokens in", String(tokens_prompt)]);
-    if (tokens_output) metrics.push(["tokens out", String(tokens_output)]);
-    if (typeof cost_usd === "number") metrics.push(["cost", `$${cost_usd.toFixed(4)}`]);
+  switch (verdict) {
+    case "true_replicated":
+      return { text: "Claim replicated successfully", tone: "positive" as const };
+    case "likely_true":
+      return { text: "Evidence leans toward accuracy", tone: "warning" as const };
+    case "likely_exaggerated":
+      return { text: "Evidence points to exaggeration", tone: "negative" as const };
+    case "no_evidence":
+    default:
+      return { text: "No supporting evidence found", tone: "muted" as const };
   }
-
-  const note = status.diffs && status.diffs.length > 0 ? status.diffs[0] : undefined;
-
-  return (
-    <div
-      className="hover-card"
-      style={{
-        borderColor: meta.border,
-        background: meta.background,
-        color: meta.text,
-      }}
-    >
-      <div className="hover-header">{meta.label}</div>
-      <div className="hover-body">
-        {metrics.length > 0 ? (
-          <ul>
-            {metrics.map(([label, value]) => (
-              <li key={label}>
-                <span>{label}</span>
-                <strong>{value}</strong>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p>No metrics yet.</p>
-        )}
-        {note && (
-          <div className="hover-diff">
-            <span>Notes:</span>
-            <p>{note.message ?? JSON.stringify(note)}</p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 export default function Page() {
@@ -168,7 +286,38 @@ export default function Page() {
   const [runStatus, setRunStatus] = useState<Record<string, RunStatus | undefined>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [openClaimId, setOpenClaimId] = useState<string | null>(null);
-  const [hoverCard, setHoverCard] = useState<{ id: string; x: number; y: number } | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const highlightContentRef = useRef<HTMLDivElement | null>(null);
+  const [isFocused, setIsFocused] = useState(false);
+
+  const syncHighlightScroll = useCallback((element: HTMLTextAreaElement | null) => {
+    if (!element || !highlightContentRef.current) return;
+    const { scrollTop, scrollLeft } = element;
+    highlightContentRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
+  }, []);
+
+  useEffect(() => {
+    const claimLookup = new Map(claims.map((claim) => [claim.id, claim] as const));
+
+    setSegments((previous) => {
+      if (previous.length === 0) return previous;
+
+      let hasChanges = false;
+      const next = previous.map((segment) => {
+        const statusObj = runStatus[segment.id];
+        const statusKey = (statusObj?.status ?? "idle") as Segment["status"];
+        const verdict = resolveVerdict(claimLookup.get(segment.id), statusObj);
+
+        if (segment.status === statusKey && segment.verdict === verdict) {
+          return segment;
+        }
+        hasChanges = true;
+        return { ...segment, status: statusKey, verdict };
+      });
+
+      return hasChanges ? next : previous;
+    });
+  }, [claims, runStatus]);
 
   const statusMessage = useMemo(() => {
     if (isSubmitting) return "Parsing claim";
@@ -182,6 +331,109 @@ export default function Page() {
     }
     return null;
   }, [claims, isSubmitting, runStatus]);
+
+  const highlightNodes = useMemo<ReactNode[]>(() => {
+    if (!raw) {
+      return [
+        <span key="placeholder" className="claim-placeholder">
+          Paste a claim statement here...
+        </span>,
+      ];
+    }
+
+    const styleFor = (verdictKey: Verdict) => {
+      const meta = VERDICT_META[verdictKey] ?? VERDICT_META.no_evidence;
+      const emphasis = verdictKey === "no_evidence" ? 0.16 : 0.28;
+      return {
+        color: meta.chipText,
+        textDecorationColor: meta.chipBg,
+        backgroundColor: hexToRgba(meta.chipBg, emphasis),
+        boxShadow: `0 0 0 1px ${hexToRgba(meta.chipBg, 0.25)} inset`,
+      };
+    };
+
+    const positioned = segments
+      .filter((segment) => segment.start !== null && segment.end !== null && segment.end > segment.start)
+      .sort((a, b) => (a.start! - b.start!));
+
+    if (positioned.length === 0) {
+      if (segments.length === 0) {
+        return [
+          <span key="plain" className="claim-plain">
+            {raw}
+          </span>,
+        ];
+      }
+
+      return segments.flatMap((segment, index) => {
+        const verdictKey = segment.verdict;
+        const content = (
+          <span
+            key={`segment-${segment.id}-${index}`}
+            className={`highlight-segment verdict-${verdictKey}`}
+            style={styleFor(verdictKey)}
+          >
+            {segment.text}
+          </span>
+        );
+
+        if (index === segments.length - 1) {
+          return [content];
+        }
+
+        return [
+          content,
+          <span key={`space-${segment.id}-${index}`} className="claim-plain">
+            {" "}
+          </span>,
+        ];
+      });
+    }
+
+    const nodes: ReactNode[] = [];
+    let cursor = 0;
+
+    positioned.forEach((segment, index) => {
+      const start = Math.max(segment.start ?? 0, cursor);
+      const end = Math.max(segment.end ?? start, start);
+      if (start > cursor) {
+        nodes.push(
+          <span key={`plain-${cursor}-${start}`} className="claim-plain">
+            {raw.slice(cursor, start)}
+          </span>,
+        );
+      }
+
+      if (end > start) {
+        const verdictKey = segment.verdict;
+        nodes.push(
+          <span
+            key={`segment-${segment.id}-${index}`}
+            className={`highlight-segment verdict-${verdictKey}`}
+            style={styleFor(verdictKey)}
+          >
+            {raw.slice(start, end)}
+          </span>,
+        );
+      }
+
+      cursor = Math.max(cursor, end);
+    });
+
+    if (cursor < raw.length) {
+      nodes.push(
+        <span key="plain-tail" className="claim-plain">
+          {raw.slice(cursor)}
+        </span>,
+      );
+    }
+
+    return nodes;
+  }, [raw, segments]);
+
+  useEffect(() => {
+    syncHighlightScroll(textareaRef.current);
+  }, [raw, segments, syncHighlightScroll]);
 
   function canRun(claimId: string) {
     const current = runStatus[claimId]?.status;
@@ -309,12 +561,23 @@ export default function Page() {
           Paste a claim below and click validate. We will parse it, run the appropriate test suite, and color-code the
           results.
         </p>
-        <textarea
-          value={raw}
-          onChange={(event) => setRaw(event.target.value)}
-          placeholder="Paste a claim statement here..."
-          className="claim-input"
-        />
+        <div className={`claim-input-wrapper ${isFocused ? "is-focused" : ""}`}>
+          <div className="claim-input-highlights" aria-hidden="true">
+            <div className="claim-input-highlights-content" ref={highlightContentRef}>
+              {highlightNodes}
+            </div>
+          </div>
+          <textarea
+            ref={textareaRef}
+            value={raw}
+            onChange={(event) => setRaw(event.target.value)}
+            placeholder="Paste a claim statement here..."
+            className="claim-input"
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            onScroll={(event) => syncHighlightScroll(event.currentTarget)}
+          />
+        </div>
         <div className="actions">
           <button onClick={submitClaim} disabled={isSubmitting || !raw.trim()} className="primary">
             {isSubmitting ? "Validating..." : "Validate Claim"}
@@ -327,36 +590,6 @@ export default function Page() {
             <span>{statusMessage}...</span>
           </div>
         )}
-
-        {segments.length > 0 && (
-          <section className="claim-text">
-            <h2>Claim Text</h2>
-            <div className="claim-lines">
-              {segments.map((segment) => {
-                const status = runStatus[segment.id];
-                const key: RunStatus["status"] | "idle" = status?.status ?? "idle";
-                const meta = STATUS_META[key];
-                const isActive = hoverCard?.id === segment.id;
-                return (
-                  <span
-                    key={segment.id}
-                    className={`claim-line ${key} ${isActive ? "active" : ""}`}
-                    style={{ color: meta.text, borderColor: meta.border }}
-                    onMouseEnter={(event) => {
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setHoverCard({ id: segment.id, x: rect.left + rect.width / 2, y: rect.top });
-                    }}
-                    onMouseLeave={() => setHoverCard((info) => (info?.id === segment.id ? null : info))}
-                    onClick={() => setOpenClaimId((current) => (current === segment.id ? null : segment.id))}
-                  >
-                    {segment.text}
-                  </span>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
         {claims.length > 0 && (
           <section className="results">
             <h2>Results</h2>
@@ -364,7 +597,13 @@ export default function Page() {
               {claims.map((claim) => {
                 const status = runStatus[claim.id];
                 const statusKey: RunStatus["status"] | "idle" = status?.status ?? "idle";
-                const meta = STATUS_META[statusKey];
+                const verdict = resolveVerdict(claim, status);
+                const verdictMeta = VERDICT_META[verdict];
+                const isProgress = statusKey === "queued" || statusKey === "running";
+                const surfaceMeta = isProgress ? STATUS_META[statusKey] : verdictMeta;
+                const chipMeta = isProgress ? STATUS_META[statusKey] : verdictMeta;
+                const chipLabel = isProgress ? STATUS_META[statusKey].label : verdictMeta.label;
+                const summaryInfo = verdictSummary(verdict, statusKey);
                 const isOpen = openClaimId === claim.id;
                 const reference = typeof claim.reference_score === "number" ? claim.reference_score : "—";
 
@@ -373,9 +612,9 @@ export default function Page() {
                     key={claim.id}
                     className="claim-card"
                     style={{
-                      background: meta.background,
-                      borderColor: meta.border,
-                      color: meta.text,
+                      background: surfaceMeta.background,
+                      borderColor: surfaceMeta.border,
+                      color: surfaceMeta.text,
                     }}
                     onClick={() => setOpenClaimId((current) => (current === claim.id ? null : claim.id))}
                   >
@@ -391,9 +630,9 @@ export default function Page() {
                       <div className="card-actions">
                         <span
                           className={`status-chip ${statusKey === "running" ? "chip-pulse" : ""}`}
-                          style={{ background: meta.chipBg, color: meta.chipText }}
+                          style={{ background: chipMeta.chipBg, color: chipMeta.chipText }}
                         >
-                          {meta.label}
+                          {chipLabel}
                         </span>
                         <button
                           className="secondary"
@@ -408,14 +647,9 @@ export default function Page() {
                       </div>
                     </div>
 
-                    {status && (
-                      <div className="status-summary">
-                        {status.status === "succeeded" && <span className="summary positive">Claim validated successfully</span>}
-                        {status.status === "failed" && <span className="summary negative">Validation failed</span>}
-                        {status.status === "running" && <span className="summary indigo">Running tests...</span>}
-                        {status.status === "queued" && <span className="summary muted">Queued for execution</span>}
-                      </div>
-                    )}
+                    <div className="status-summary">
+                      <span className={`summary ${summaryInfo.tone}`}>{summaryInfo.text}</span>
+                    </div>
 
                     {status && status.diffs && status.diffs.length > 0 && (
                       <ul className="diff-list">
@@ -449,17 +683,6 @@ export default function Page() {
           </section>
         )}
       </div>
-
-      {hoverCard && runStatus[hoverCard.id] && (
-        <div
-          className="hover-wrapper"
-          style={{ left: hoverCard.x, top: hoverCard.y }}
-          onMouseLeave={() => setHoverCard(null)}
-        >
-          <MetricsHover status={runStatus[hoverCard.id]!} />
-        </div>
-      )}
-
       <style jsx>{`
         .page {
           min-height: 100vh;
@@ -472,11 +695,11 @@ export default function Page() {
         }
 
         .shell {
-          width: min(760px, 100%);
+          width: min(960px, 100%);
           display: flex;
           flex-direction: column;
           gap: 20px;
-          text-align: center;
+          text-align: left;
         }
 
         h1 {
@@ -490,24 +713,102 @@ export default function Page() {
           font-size: 1rem;
         }
 
-        .claim-input {
+        .claim-input-wrapper {
+          position: relative;
           width: 100%;
-          min-height: 22rem;
-          resize: vertical;
+          min-height: clamp(36rem, 65vh, 52rem);
           background: #0F1622;
           border: 1px solid #223040;
           border-radius: 18px;
-          padding: 24px;
-          font-size: 1.35rem;
-          line-height: 1.7;
-          color: #E6EDF3;
           box-shadow: 0 26px 45px rgba(8, 12, 20, 0.45);
+          transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .claim-input-wrapper.is-focused {
+          border-color: #2EA043;
+          box-shadow: 0 0 0 3px rgba(46, 160, 67, 0.25);
+        }
+
+        .claim-input {
+          position: relative;
+          z-index: 2;
+          width: 100%;
+          min-height: clamp(36rem, 65vh, 52rem);
+          resize: vertical;
+          border: none;
+          background: transparent;
+          color: transparent;
+          caret-color: #E6EDF3;
+          font-size: 6.75rem;
+          line-height: 1.1;
+          padding: 36px;
+          font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+          overflow: auto;
+          text-align: left;
+        }
+
+        .claim-input::placeholder {
+          color: transparent;
         }
 
         .claim-input:focus {
           outline: none;
-          border-color: #2EA043;
-          box-shadow: 0 0 0 3px rgba(46, 160, 67, 0.25);
+        }
+
+        .claim-input-highlights {
+          position: absolute;
+          inset: 0;
+          padding: 36px;
+          color: #E6EDF3;
+          font-size: 6.75rem;
+          line-height: 1.1;
+          font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+          pointer-events: none;
+          overflow: hidden;
+          z-index: 1;
+          text-align: left;
+        }
+
+        .claim-input-highlights-content {
+          position: relative;
+          white-space: pre-wrap;
+          word-break: break-word;
+          transform: translate(0, 0);
+        }
+
+        .claim-placeholder {
+          color: #9BA7B4;
+        }
+
+        .claim-plain {
+          color: rgba(230, 237, 243, 0.82);
+        }
+
+        .highlight-segment {
+          text-decoration-line: underline;
+          text-decoration-thickness: 0.18em;
+          text-decoration-skip-ink: none;
+          font-weight: 600;
+          border-radius: 10px;
+          padding: 0.05em 0.18em;
+          margin: 0 -0.05em;
+          transition: background-color 0.2s ease, color 0.2s ease;
+        }
+
+        .highlight-segment.verdict-no_evidence {
+          text-decoration-style: dotted;
+        }
+
+        .highlight-segment.verdict-likely_true {
+          text-decoration-style: dashed;
+        }
+
+        .highlight-segment.verdict-likely_exaggerated {
+          text-decoration-style: double;
+        }
+
+        .highlight-segment.verdict-true_replicated {
+          text-decoration-style: solid;
         }
 
         .actions {
@@ -565,67 +866,6 @@ export default function Page() {
           border-radius: 50%;
           background: #5C8DFF;
           animation: pulse 1.4s ease-in-out infinite;
-        }
-
-        .claim-text {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          text-align: left;
-        }
-
-        .claim-text h2 {
-          margin: 0;
-          font-size: 1.4rem;
-        }
-
-        .claim-lines {
-          display: flex;
-          flex-direction: column;
-          gap: 14px;
-          font-size: 1.25rem;
-        }
-
-        .claim-line {
-          border-bottom: 3px solid transparent;
-          padding-bottom: 6px;
-          position: relative;
-          transition: transform 0.15s ease, border-color 0.2s ease;
-        }
-
-        .claim-line:hover {
-          transform: translateY(-2px);
-        }
-
-        .claim-line.idle {
-          border-color: rgba(155, 167, 180, 0.45);
-        }
-
-        .claim-line.queued {
-          border-color: #223863;
-        }
-
-        .claim-line.running {
-          border-color: #2563EB;
-        }
-
-        .claim-line.running::after {
-          content: "";
-          position: absolute;
-          left: 0;
-          right: 0;
-          bottom: -3px;
-          height: 3px;
-          background: linear-gradient(90deg, rgba(37, 99, 235, 0), rgba(37, 99, 235, 0.5), rgba(37, 99, 235, 0));
-          animation: shimmer 1.4s linear infinite;
-        }
-
-        .claim-line.succeeded {
-          border-color: #2EA043;
-        }
-
-        .claim-line.failed {
-          border-color: #F85149;
         }
 
         .results {
@@ -744,6 +984,11 @@ export default function Page() {
           color: #C0CAD4;
         }
 
+        .summary.warning {
+          background: rgba(245, 158, 11, 0.22);
+          color: #FDE68A;
+        }
+
         .diff-list {
           margin: 12px 0 0;
           padding: 0;
@@ -776,60 +1021,6 @@ export default function Page() {
           padding-top: 18px;
         }
 
-        .hover-wrapper {
-          position: fixed;
-          transform: translate(-50%, calc(-100% - 16px));
-          pointer-events: none;
-          z-index: 30;
-        }
-
-        .hover-card {
-          min-width: 240px;
-          max-width: 320px;
-          border: 1px solid;
-          border-radius: 14px;
-          padding: 14px 16px;
-          box-shadow: 0 24px 48px rgba(8, 12, 20, 0.45);
-        }
-
-        .hover-header {
-          font-weight: 600;
-          margin-bottom: 10px;
-          text-transform: uppercase;
-          font-size: 0.8rem;
-          letter-spacing: 0.08em;
-        }
-
-        .hover-body ul {
-          list-style: none;
-          margin: 0;
-          padding: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-          font-size: 0.85rem;
-        }
-
-        .hover-body li {
-          display: flex;
-          justify-content: space-between;
-        }
-
-        .hover-body li span {
-          opacity: 0.75;
-        }
-
-        .hover-diff {
-          margin-top: 10px;
-          font-size: 0.8rem;
-          text-align: left;
-        }
-
-        .hover-diff p {
-          margin: 4px 0 0;
-          opacity: 0.8;
-        }
-
         @keyframes pulse {
           0%,
           100% {
@@ -857,21 +1048,17 @@ export default function Page() {
           }
         }
 
-        @keyframes shimmer {
-          0% {
-            transform: translateX(-100%);
-          }
-          50% {
-            transform: translateX(0%);
-          }
-          100% {
-            transform: translateX(100%);
-          }
-        }
-
         @media (max-width: 640px) {
+          .claim-input-wrapper,
           .claim-input {
-            min-height: 14rem;
+            min-height: 18rem;
+          }
+
+          .claim-input,
+          .claim-input-highlights {
+            font-size: 3rem;
+            line-height: 1.25;
+            padding: 20px;
           }
 
           .card-header {
