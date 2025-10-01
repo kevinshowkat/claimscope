@@ -1,0 +1,12 @@
+id: cagent-01
+name: Thruster Delta
+description: Compute the delta for the auxiliary thrusters.
+allowed_tools:
+  - calculator
+steps:
+  - tool: calculator
+    input: "12 * 4 + 6"
+    expect: "54"
+final_answer: "54"
+timeout_s: 30
+seed: 1001

@@ -1,0 +1,19 @@
+id: cagent-07
+name: Payload Mass
+description: Retrieve payload mass from the database and confirm the standby power budget.
+allowed_tools:
+  - sqlite
+  - calculator
+steps:
+  - tool: sqlite
+    input: "SELECT value FROM facts WHERE topic='payload_mass_kg';"
+    expect: "[{'value': '8200'}]"
+  - tool: sqlite
+    input: "SELECT value FROM facts WHERE topic='standby_power_kw';"
+    expect: "[{'value': '42'}]"
+  - tool: calculator
+    input: "8200 / 42"
+    expect: "195.23809523809524"
+final_answer: "Payload mass 8200 kg with 42 kW standby draw"
+timeout_s: 40
+seed: 1007

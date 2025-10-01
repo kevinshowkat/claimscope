@@ -1,0 +1,23 @@
+[
+  {
+    "title": "Mars Mission",
+    "sections": {
+      "summary": "The Aurora mission launches in 2035 with a crew of four scientists bound for Mars orbit.",
+      "objectives": "Study polar ice deposits and deploy long-duration satellites."
+    }
+  },
+  {
+    "title": "Claimscope",
+    "sections": {
+      "summary": "Claimscope is an evaluation harness founded in 2024 to reproduce AI lab claims with pinned datasets and open tooling.",
+      "history": "Founded in 2024 to promote transparent regression testing."
+    }
+  },
+  {
+    "title": "Lunar Water",
+    "sections": {
+      "summary": "Recent rover readings confirm basaltic craters contain ice crystals peaking at dawn.",
+      "details": "The crystals sublimate under direct sunlight but persist in shadowed ridges."
+    }
+  }
+]

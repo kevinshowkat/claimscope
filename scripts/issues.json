@@ -1,0 +1,72 @@
+[
+  {
+    "title": "area:api feat — Implement /submit_claim endpoint",
+    "body": "Implement POST /submit_claim. Accept {raw_text}|{url}. Store placeholder claim and return {claim_ids, claims}. Wire to DB.",
+    "labels": ["area:api","feat"]
+  },
+  {
+    "title": "area:harness feat — lm-eval adapter (HumanEval/MBPP)",
+    "body": "Create lm-eval adapter with pinned datasets (HF snapshot commit). Implement harness command logging and trace manifest.",
+    "labels": ["area:harness","feat"]
+  },
+  {
+    "title": "area:harness feat — SWE-bench Lite adapter",
+    "body": "Integrate SWE-bench Lite runner with deterministic environment (image SHA pinned). Record issue-level artifacts.",
+    "labels": ["area:harness","feat"]
+  },
+  {
+    "title": "area:harness feat — cAgent-12 tool sandbox + tasks",
+    "body": "Bundle offline tools (calculator, sqlite, offline wiki, calendar, filesystem). Implement YAML tasks loader and step tracing.",
+    "labels": ["area:harness","feat"]
+  },
+  {
+    "title": "area:harness feat — cGUI-10 Playwright runner",
+    "body": "Serve deterministic static apps and run Playwright tasks. Export PDF traces and wall-clock metrics.",
+    "labels": ["area:harness","feat"]
+  },
+  {
+    "title": "area:frontend feat — Claim Intake + Cards UI",
+    "body": "Implement paste/parse flow, Claim Cards with status pill, sparkline, ops capsule, and Run CTA.",
+    "labels": ["area:frontend","feat"]
+  },
+  {
+    "title": "area:frontend feat — Receipt Drawer (artifacts, diffs)",
+    "body": "Receipt view with Metrics & CI, Diff chips, Harness command, Dataset hash, Prompt/decoding, Seeds, Logs, Artifacts.",
+    "labels": ["area:frontend","feat"]
+  },
+  {
+    "title": "area:frontend feat — Compare View",
+    "body": "Side-by-side original vs reproduction with CI bars and drift chips. Tabs for Agent/GUI traces.",
+    "labels": ["area:frontend","feat"]
+  },
+  {
+    "title": "area:infra chore — Docker images & pinned SHAs",
+    "body": "Pin base images and harness images. Emit image SHAs to trace manifest. Update compose for reproducibility.",
+    "labels": ["area:infra","chore"]
+  },
+  {
+    "title": "area:obs feat — Grafana dashboards & alerts",
+    "body": "OpenTelemetry -> Prometheus, dashboards (latency, cost, status mix). Alerts for p95 page >1.2s, cache hit <70%, run failures.",
+    "labels": ["area:obs","feat"]
+  },
+  {
+    "title": "type:chore — Dataset cards for all suites",
+    "body": "Fill /docs/datasets/<id>.md template with source, license, snapshot commit, content hash, metrics, caveats, repro notes.",
+    "labels": ["type:chore"]
+  },
+  {
+    "title": "type:chore — PDF export via Playwright route",
+    "body": "Implement server route to render receipts to PDF via Playwright. Add footer with manifest hash and timestamps.",
+    "labels": ["type:chore"]
+  },
+  {
+    "title": "good-first-issue — Add keyboard focus outlines",
+    "body": "Ensure accessible focus rings and skip links. Verify tab order across Intake, Receipt, Compare views.",
+    "labels": ["good-first-issue","a11y"]
+  },
+  {
+    "title": "type:bug — Fix reducer for status mapping",
+    "body": "Status logic: Replicated/Setting Drift/Underspecified/Not Reproduced. Ensure agreement score mapping and drift rules are applied correctly.",
+    "labels": ["type:bug"]
+  }
+]

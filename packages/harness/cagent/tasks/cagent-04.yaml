@@ -1,0 +1,12 @@
+id: cagent-04
+name: Crew Count Query
+description: Query the roster database for crew count.
+allowed_tools:
+  - sqlite
+steps:
+  - tool: sqlite
+    input: "SELECT value FROM facts WHERE topic='crew_count';"
+    expect: "[{'value': '4'}]"
+final_answer: "4"
+timeout_s: 30
+seed: 1004

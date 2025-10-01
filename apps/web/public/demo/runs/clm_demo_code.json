@@ -1,0 +1,11 @@
+{
+  "run_id": "run_001",
+  "status": "succeeded",
+  "scores": {"metric":"pass@1","value":0.76,"n":164},
+  "ops": {"p95_latency_s": 2.4, "tokens_prompt": 14200, "tokens_output": 3000, "cost_usd": 0.018},
+  "artifacts": [{"name":"logs.txt","url":"/demo/artifacts/logs.txt","sha256":"demo"}],
+  "diffs": [{"dimension":"prompt_template","ref":"tmpl_a","obs":"tmpl_b"}],
+  "ci": {"lower":0.69,"upper":0.82,"method":"bootstrap"},
+  "variance": {"stdev":0.03,"se":0.012},
+  "trace_id": "tr_demo_code"
+}

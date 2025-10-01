@@ -1,0 +1,9 @@
+{
+  "run_id": "run_003",
+  "status": "succeeded",
+  "scores": {"metric":"task_success","value":0.69,"n":10},
+  "ops": {"p95_latency_s": 17.2, "cost_usd": 0.006},
+  "artifacts": [{"name":"playwright_trace.zip","url":"/demo/artifacts/playwright_trace.zip","sha256":"demo"}],
+  "ci": {"lower":0.45,"upper":0.86,"method":"bootstrap"},
+  "trace_id": "tr_demo_gui"
+}

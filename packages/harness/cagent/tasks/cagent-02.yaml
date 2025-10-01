@@ -1,0 +1,12 @@
+id: cagent-02
+name: Docking Window
+description: Convert the docking briefing into an ISO date.
+allowed_tools:
+  - calendar
+steps:
+  - tool: calendar
+    input: "Next Wednesday, April 18 2035 at 1:30 pm UTC"
+    expect: "2035-04-18"
+final_answer: "2035-04-18"
+timeout_s: 30
+seed: 1002

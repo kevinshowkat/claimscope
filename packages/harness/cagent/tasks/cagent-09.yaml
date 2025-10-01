@@ -1,0 +1,12 @@
+id: cagent-09
+name: Timeline Adjustment
+description: Determine the ISO date two days after the launch window briefing.
+allowed_tools:
+  - calendar
+steps:
+  - tool: calendar
+    input: "two days after April 18 2035"
+    expect: "2035-04-20"
+final_answer: "2035-04-20"
+timeout_s: 30
+seed: 1009

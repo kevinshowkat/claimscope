@@ -1,0 +1,12 @@
+id: cagent-08
+name: Claimscope Origin
+description: Provide the founding year of Claimscope.
+allowed_tools:
+  - wiki
+steps:
+  - tool: wiki
+    input: "Claimscope"
+    expect: "Claimscope is an evaluation harness that reproduces AI lab claims with pinned datasets and open tooling."
+final_answer: "Founded in 2024"
+timeout_s: 30
+seed: 1008

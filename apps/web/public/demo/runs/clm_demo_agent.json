@@ -1,0 +1,9 @@
+{
+  "run_id": "run_002",
+  "status": "succeeded",
+  "scores": {"metric":"success@1","value":0.64,"n":12},
+  "ops": {"p95_latency_s": 9.8, "cost_usd": 0.012, "tool_error_rate": 0.03},
+  "artifacts": [{"name":"agent_trace.json","url":"/demo/artifacts/agent_trace.json","sha256":"demo"}],
+  "ci": {"lower":0.46,"upper":0.79,"method":"bootstrap"},
+  "trace_id": "tr_demo_agent"
+}

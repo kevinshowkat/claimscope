@@ -1,0 +1,12 @@
+id: cagent-03
+name: Mission Summary
+description: Recall the short summary for the Aurora mission.
+allowed_tools:
+  - wiki
+steps:
+  - tool: wiki
+    input: "Mars Mission"
+    expect: "The Aurora mission launches in 2035 with a crew of four scientists bound for Mars orbit."
+final_answer: "The Aurora mission launches in 2035 with a crew of four scientists bound for Mars orbit."
+timeout_s: 30
+seed: 1003

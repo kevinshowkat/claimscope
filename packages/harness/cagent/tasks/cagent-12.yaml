@@ -1,0 +1,16 @@
+id: cagent-12
+name: Orbit Envelope
+description: Read orbital report and compute altitude span.
+allowed_tools:
+  - fs
+  - calculator
+steps:
+  - tool: fs
+    input: "orbital_report.json"
+    expect: "{\"apoapsis_km\": 420.5, \"periapsis_km\": 398.1, \"inclination_deg\": 51.6}"
+  - tool: calculator
+    input: "420.5 - 398.1"
+    expect: "22.4"
+final_answer: "Altitude span 22.4 km"
+timeout_s: 40
+seed: 1012

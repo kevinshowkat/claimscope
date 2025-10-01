@@ -1,0 +1,12 @@
+id: cagent-05
+name: System Status Brief
+description: Read the latest system status bulletin from files.
+allowed_tools:
+  - fs
+steps:
+  - tool: fs
+    input: "system_status.txt"
+    expect: "Subsystem temperatures stable. Batteries at 94%. Comms uplink scheduled for 18:00 UTC."
+final_answer: "Subsystem temperatures stable. Batteries at 94%. Comms uplink scheduled for 18:00 UTC."
+timeout_s: 30
+seed: 1005

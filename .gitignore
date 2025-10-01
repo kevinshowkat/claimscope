@@ -1,0 +1,29 @@
+# Node
+node_modules/
+.npm/
+.next/
+out/
+dist/
+*.log
+pnpm-lock.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+.mypy_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Docker
+docker-volume/
+*.local
+
+# Misc
+coverage/
+*.sqlite3

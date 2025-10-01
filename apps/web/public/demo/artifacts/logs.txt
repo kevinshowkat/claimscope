@@ -1,0 +1,3 @@
+Demo logs for seeded run.
+Line 1: ok
+Line 2: ok

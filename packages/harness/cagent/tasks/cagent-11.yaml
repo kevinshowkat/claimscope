@@ -1,0 +1,15 @@
+id: cagent-11
+name: Orbit Planning
+description: Confirm the mission destination and last maintenance date.
+allowed_tools:
+  - sqlite
+steps:
+  - tool: sqlite
+    input: "SELECT value FROM facts WHERE topic='destination';"
+    expect: "[{'value': 'Mars Orbit'}]"
+  - tool: sqlite
+    input: "SELECT value FROM facts WHERE topic='last_maintenance';"
+    expect: "[{'value': '2034-12-01'}]"
+final_answer: "Mars Orbit, serviced 2034-12-01"
+timeout_s: 35
+seed: 1011

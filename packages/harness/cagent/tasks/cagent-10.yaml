@@ -1,0 +1,16 @@
+id: cagent-10
+name: Dawn Operations
+description: Summarize the dawn operations referencing lunar water findings.
+allowed_tools:
+  - wiki
+  - fs
+steps:
+  - tool: wiki
+    input: "Lunar Water"
+    expect: "Recent rover readings confirm basaltic craters contain ice crystals peaking at dawn."
+  - tool: fs
+    input: "system_status.txt"
+    expect: "Subsystem temperatures stable. Batteries at 94%. Comms uplink scheduled for 18:00 UTC."
+final_answer: "Ice crystals peak at dawn; ensure uplink at 18:00 UTC"
+timeout_s: 35
+seed: 1010

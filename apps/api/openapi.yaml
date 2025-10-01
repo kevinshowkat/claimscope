@@ -1,0 +1,45 @@
+openapi: 3.0.3
+info:
+  title: Claimscope API
+  version: 0.1.0
+paths:
+  /submit_claim:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [raw_text]
+                  properties: { raw_text: {type: string} }
+                - type: object
+                  required: [url]
+                  properties: { url: {type: string, format: uri} }
+      responses:
+        "200": { description: OK }
+  /run_reproduction:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [claim_id, model_config, budget_usd]
+              properties:
+                claim_id: {type: string}
+                model_config:
+                  type: object
+                  properties: { provider: {type: string}, name: {type: string}, api_key_ref: {type: string} }
+                budget_usd: {type: number}
+      responses: { "200": { description: OK } }
+  /runs/{run_id}:
+    get:
+      parameters: [{name: run_id, in: path, required: true, schema: {type: string}}]
+      responses: { "200": { description: OK } }
+  /claims/{claim_id}:
+    get:
+      parameters: [{name: claim_id, in: path, required: true, schema: {type: string}}]
+      responses: { "200": { description: OK } }

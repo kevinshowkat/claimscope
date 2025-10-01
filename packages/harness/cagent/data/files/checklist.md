@@ -1,0 +1,3 @@
+- Calibrate nav beacons
+- Review mission brief delta
+- Update inflight logbook summary

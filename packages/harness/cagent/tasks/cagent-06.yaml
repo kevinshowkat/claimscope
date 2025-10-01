@@ -1,0 +1,16 @@
+id: cagent-06
+name: Checklist Review
+description: Retrieve the mission checklist and provide the second item.
+allowed_tools:
+  - fs
+  - calculator
+steps:
+  - tool: fs
+    input: "checklist.md"
+    expect: "- Calibrate nav beacons\n- Review mission brief delta\n- Update inflight logbook summary"
+  - tool: calculator
+    input: "1 + 1"
+    expect: "2"
+final_answer: "Review mission brief delta"
+timeout_s: 35
+seed: 1006

@@ -1,0 +1,5 @@
+[
+  {"id":"clm_demo_code","model":"DemoModel X","domain":"coding","task":"HumanEval","metric":"pass@1","reference_score":0.78,"confidence":0.9,"source_url":"https://example.com/blog"},
+  {"id":"clm_demo_agent","model":"DemoModel A","domain":"agents","task":"cAgent-12","metric":"success@1","reference_score":0.67,"confidence":0.8,"source_url":"https://example.com/post"},
+  {"id":"clm_demo_gui","model":"DemoModel G","domain":"computer-use","task":"cGUI-10","metric":"task_success","reference_score":0.70,"confidence":0.85,"source_url":"https://example.com/pr"}
+]
