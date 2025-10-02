@@ -60,6 +60,16 @@ This playbook captures the near-term replication work for open benchmarks cited 
   2. Add `apps/api/worker/factuality_longfact.py` to route claims requesting hallucination reduction; emit baseline diffs when referencing percent-error drops.
 - **Blockers:** judge models require closed weights; default to open-source alternatives (e.g., `gpt-4o-mini` analog) or human-labeled subsets for validation.
 
+## Token Efficiency Claims
+- **Claim row:** `docs/claimscope_marketing_claims.csv:12`
+- **Status:** Telemetry harness (`apps/api/worker/efficiency_tokens.py`) can replay prompts across primary/comparator models and log token usage; parser auto-tags efficiency claims.
+- **Next steps:** curate prompt bundles + model configs for GPT-5 vs o3, capture baseline telemetry, and wire results into marketing claims so they no longer default to the underspecified guardrail.
+
+## Claimscope Coding Competition
+- **Scope:** In-house three-task coding suite (`packages/harness/coding_competition/tasks.json`) with deterministic unit tests.
+- **Harness:** `apps/api/worker/coding_competition.py` generates Python solutions for both primary and comparator configs, enforcing consistency and recording pass rates plus token usage.
+- **Usage:** set claim settings `comparative_suite="coding_competition"` and supply comparator model configs/keys under `settings.telemetry.comparators`.
+
 ---
 
 **Next Actions**

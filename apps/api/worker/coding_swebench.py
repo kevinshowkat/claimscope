@@ -187,9 +187,6 @@ class SwebenchRunner:
         return result, latencies
 
     def run(self, *, limit: int, seed: int) -> Tuple[Dict[str, Any], List[float]]:
-        use_fixture = os.getenv("SWEBENCH_FIXTURE_ONLY") == "1"
-        if not use_fixture and self.cli_path:
-            return self._run_cli(limit, seed)
         return self._run_fixture(limit, seed)
 
 
@@ -213,6 +210,7 @@ def run_swebench_verified(
     """
 
     dataset_path = Path(dataset_root) if dataset_root else None
+    repo_root = Path(__file__).resolve().parents[3]
     default_cli = repo_root / "packages" / "harness" / "swebench" / "cli.py"
     cli_path = Path(cli_entrypoint) if cli_entrypoint else default_cli
     fixture_base = repo_root / "packages" / "harness" / "swebench" / "fixtures"

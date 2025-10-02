@@ -10,11 +10,13 @@ from sqlalchemy import create_engine, text
 from .agents_cagent import run_cagent_suite
 from .coding_humaneval import run_humaneval_subset
 from .coding_swebench import DATASET_ID as SWEBENCH_DATASET_ID, run_swebench_verified
+from .coding_competition import run_coding_competition, CodingBenchError
 from .gui_cgui import run_cgui_suite
 from .logging_utils import get_logger
 from .reasoning_gsm8k import bootstrap_ci, run_gsm8k_subset
 from .trace_manifest import record_trace
 from .vision_mmmu import MMMU_DATASET_DIGEST, MMMU_DATASET_ID, MMMUDataError, run_mmmu_subset
+from .efficiency_tokens import run_efficiency_telemetry, TokenTelemetryError
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/claimscope")
 engine = create_engine(DATABASE_URL, future=True)
@@ -25,6 +27,9 @@ HUMANEVAL_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "coding_humaneval.py"
 SWEBENCH_PATHS = [
     REPO_ROOT / "apps" / "api" / "worker" / "coding_swebench.py",
     REPO_ROOT / "packages" / "harness" / "swebench" / "README.md",
+]
+EFFICIENCY_PATHS = [
+    REPO_ROOT / "apps" / "api" / "worker" / "efficiency_tokens.py",
 ]
 GSM8K_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "reasoning_gsm8k.py"]
 VISION_PATHS = [
@@ -291,6 +296,280 @@ def process_one(run_id: str, claim_id: str) -> None:
             )
             conn.commit()
             return False
+
+        if domain == "efficiency" or metric == "token_delta":
+            telemetry_settings = settings.get("telemetry") if isinstance(settings, dict) else None
+            prompts = telemetry_settings.get("prompts") if isinstance(telemetry_settings, dict) else None
+            if isinstance(prompts, str):
+                prompts = [prompts]
+            elif prompts and not isinstance(prompts, list):
+                prompts = list(prompts)
+            comparator_configs = telemetry_settings.get("comparators") if isinstance(telemetry_settings, dict) else None
+            if isinstance(comparator_configs, dict):
+                comparator_configs = [comparator_configs]
+            elif comparator_configs and not isinstance(comparator_configs, list):
+                comparator_configs = list(comparator_configs)
+            temperature = float(telemetry_settings.get("temperature", 0.0)) if telemetry_settings else 0.0
+            max_output_tokens_value = telemetry_settings.get("max_output_tokens") if telemetry_settings else None
+            try:
+                max_output_tokens = int(max_output_tokens_value) if max_output_tokens_value is not None else 1024
+            except (TypeError, ValueError):
+                max_output_tokens = 1024
+
+            if not prompts or not comparator_configs:
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="missing_telemetry",
+                    message="Efficiency claims require token telemetry bundles.",
+                    details={**_comparison_details(), "required_artifact": "token_telemetry"},
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::efficiency_telemetry_missing",
+                    dataset_id="token-telemetry@pending",
+                    params={
+                        "domain": domain,
+                        "task": task,
+                        "metric": metric,
+                        "comparators": comparators,
+                    },
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "missing_telemetry"},
+                )
+                return
+
+            try:
+                telemetry_result = run_efficiency_telemetry(
+                    prompts=prompts,
+                    primary_config=model_cfg,
+                    comparator_configs=comparator_configs,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                )
+            except TokenTelemetryError as exc:
+                logger.exception("Efficiency telemetry error for %s", run_id)
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="telemetry_error",
+                    message=str(exc),
+                    details={**_comparison_details(), "required_artifact": "token_telemetry"},
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::efficiency_telemetry_error",
+                    dataset_id="token-telemetry@pending",
+                    params={
+                        "domain": domain,
+                        "task": task,
+                        "metric": metric,
+                        "comparators": comparators,
+                    },
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "telemetry_error", "message": str(exc)},
+                )
+                return
+
+            primary_summary = telemetry_result.get("primary", {})
+            comparator_summaries = telemetry_result.get("comparators", [])
+            savings = comparator_summaries[0].get("savings_pct") if comparator_summaries else None
+            score_value = None if savings is None else savings / 100.0
+            status_label = "Replicated"
+
+            diff_entries: List[Dict[str, Any]] = []
+            diff_entries.append(
+                {
+                    "reason": "token_usage",
+                    "message": "Primary token usage",
+                    "input_tokens": primary_summary.get("input_tokens"),
+                    "output_tokens": primary_summary.get("output_tokens"),
+                    "total_tokens": primary_summary.get("total_tokens"),
+                    "requests": primary_summary.get("requests"),
+                }
+            )
+            for comp in comparator_summaries:
+                diff_entries.append(
+                    {
+                        "reason": "comparator",
+                        "message": f"{comp.get('model')} tokens",
+                        "provider": comp.get("provider"),
+                        "input_tokens": comp.get("input_tokens"),
+                        "output_tokens": comp.get("output_tokens"),
+                        "total_tokens": comp.get("total_tokens"),
+                        "requests": comp.get("requests"),
+                        "savings_pct": comp.get("savings_pct"),
+                    }
+                )
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE runs SET status=:status, score_value=:score_value, ci_lower=NULL, ci_upper=NULL,
+                      ops=CAST(:ops AS JSONB), diffs=CAST(:diffs AS JSONB), status_label=:status_label,
+                      trace_id=:trace_id, completed_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "status": "succeeded",
+                    "score_value": score_value,
+                    "ci_lower": None,
+                    "ci_upper": None,
+                    "ops": json.dumps(
+                        {
+                            "primary_input_tokens": primary_summary.get("input_tokens"),
+                            "primary_output_tokens": primary_summary.get("output_tokens"),
+                            "requests": primary_summary.get("requests"),
+                        }
+                    ),
+                    "diffs": json.dumps(diff_entries),
+                    "status_label": status_label,
+                    "trace_id": trace_id,
+                },
+            )
+            record_trace(
+                conn,
+                run_id,
+                harness_cmd="python -m worker.efficiency_tokens",
+                harness_paths=EFFICIENCY_PATHS,
+                dataset_id="token-telemetry",
+                params={
+                    "domain": domain,
+                    "task": task,
+                    "metric": metric,
+                    "comparators": comparators,
+                    "prompts": list(prompts),
+                },
+                seeds={},
+                tokens_prompt=int(primary_summary.get("input_tokens") or 0),
+                tokens_output=int(primary_summary.get("output_tokens") or 0),
+                cost_usd=0.0,
+                latencies=telemetry_result.get("latencies", []),
+            )
+            _increment_validation_count(conn, claim_id)
+            conn.commit()
+            return
+
+        if domain == "coding" and settings.get("comparative_suite") == "coding_competition":
+            comp_cfgs = settings.get("telemetry", {}).get("comparators") if isinstance(settings.get("telemetry"), dict) else settings.get("comparative_models")
+            if isinstance(comp_cfgs, dict):
+                comp_cfgs = [comp_cfgs]
+            if not isinstance(comp_cfgs, list) or not comp_cfgs:
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="missing_comparator_config",
+                    message="Comparative suite requires comparator model configs.",
+                    details=_comparison_details(),
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::coding_competition_missing_comparators",
+                    dataset_id="coding-competition",
+                    params={"domain": domain, "task": task, "metric": metric},
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "missing_comparators"},
+                )
+                return
+            temperature = float(settings.get("temperature") or 0.0)
+            try:
+                results = run_coding_competition(
+                    primary_config=model_cfg,
+                    comparator_configs=comp_cfgs,
+                    temperature=temperature,
+                )
+            except CodingBenchError as exc:
+                logger.exception("Coding competition harness failed for %s", run_id)
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="coding_competition_error",
+                    message=str(exc),
+                    status_label="Failed",
+                )
+                return
+
+            baseline = results.get("baseline", {})
+            comparators_info = results.get("comparators", [])
+            status_label = "Replicated"
+            diff_entries: List[Dict[str, Any]] = []
+            diff_entries.append(
+                {
+                    "reason": "baseline",
+                    "message": "Baseline pass rate",
+                    "passed": baseline.get("passed"),
+                    "attempted": baseline.get("attempted"),
+                    "pass_rate": baseline.get("pass_rate"),
+                }
+            )
+            for comp in comparators_info:
+                diff_entries.append(
+                    {
+                        "reason": "comparator",
+                        "message": f"{comp.get('model')} performance",
+                        "passed": comp.get("passed"),
+                        "attempted": comp.get("attempted"),
+                        "pass_rate": comp.get("pass_rate"),
+                        "avg_latency_s": comp.get("avg_latency_s"),
+                        "input_tokens": comp.get("input_tokens"),
+                        "output_tokens": comp.get("output_tokens"),
+                    }
+                )
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE runs SET status=:status, score_value=:score_value, ci_lower=NULL, ci_upper=NULL,
+                      ops=CAST(:ops AS JSONB), diffs=CAST(:diffs AS JSONB), status_label=:status_label,
+                      trace_id=:trace_id, completed_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "status": "succeeded",
+                    "score_value": baseline.get("pass_rate"),
+                    "ci_lower": None,
+                    "ci_upper": None,
+                    "ops": json.dumps({"tasks": baseline.get("attempted")}),
+                    "diffs": json.dumps(diff_entries),
+                    "status_label": status_label,
+                    "trace_id": trace_id,
+                },
+            )
+            record_trace(
+                conn,
+                run_id,
+                harness_cmd="python -m worker.coding_competition",
+                harness_paths=[REPO_ROOT / "apps" / "api" / "worker" / "coding_competition.py"],
+                dataset_id="coding-competition",
+                params={"domain": domain, "task": task, "metric": metric},
+                seeds={},
+                tokens_prompt=0,
+                tokens_output=0,
+                cost_usd=0.0,
+            )
+            _increment_validation_count(conn, claim_id)
+            conn.commit()
+            return
 
         if domain == "vision":
             if not _guard_cost(ESTIMATED_LLM_COSTS.get(domain, 0.0)):
@@ -560,6 +839,23 @@ def process_one(run_id: str, claim_id: str) -> None:
                     reason="missing_predictions",
                     message="SWE-bench claims require swebench_predictions setting",
                     details={**_comparison_details(), "required_setting": "swebench_predictions"},
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::swebench_predictions_missing",
+                    dataset_id=SWEBENCH_DATASET_ID,
+                    params={
+                        "domain": domain,
+                        "task": task,
+                        "metric": metric,
+                        "comparators": comparators,
+                    },
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "missing_predictions"},
                 )
                 return
             max_workers = settings.get("swebench_max_workers") or os.getenv("SWEBENCH_MAX_WORKERS")

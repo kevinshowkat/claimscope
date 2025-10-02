@@ -136,6 +136,47 @@ def _extract_percentage_near(text: str, keywords: List[str]) -> Optional[float]:
     return best[1]
 
 
+def _extract_percentage_range(text: str, keywords: List[str]) -> Optional[Tuple[float, float]]:
+    lowered = text.lower()
+    if not keywords:
+        return None
+    pattern = r"(\d+(?:\.\d+)?)\s*[-\u2013]\s*(\d+(?:\.\d+)?)\s*%"
+    for match in re.finditer(pattern, text):
+        start, end = match.span()
+        window = lowered[max(0, start - 64): min(len(lowered), end + 64)]
+        if any(keyword in window for keyword in keywords):
+            try:
+                lo = float(match.group(1))
+                hi = float(match.group(2))
+            except ValueError:
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            return lo, hi
+    return None
+
+
+def _extract_capabilities(text: str) -> List[str]:
+    lowered = text.lower()
+    patterns = [
+        r"(?:including|across|such as)\s+([^.;]+)",
+        r"(?:covering|spanning)\s+([^.;]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            fragment = text[match.start(1):match.end(1)]
+            parts = re.split(r",| and | & |/", fragment)
+            cleaned = []
+            for part in parts:
+                value = part.strip().strip(". ")
+                if value:
+                    cleaned.append(value)
+            if cleaned:
+                return cleaned[:6]
+    return []
+
+
 def _detect_primary_model(text: str) -> Optional[str]:
     patterns = [
         r"claude opus\s*[0-9.]*",
@@ -252,6 +293,71 @@ def submit_claim(body: SubmitClaimRequest):
         frontend_score = _extract_percentage_near(body.raw_text or "", frontend_keywords)
         ref = frontend_score / 100.0 if frontend_score is not None else None
         add("coding", "Front-end developer study", "win_rate", ref, 0.7, settings=settings, model_hint=primary_model)
+
+    efficiency_tokens = ["token", "tokens"]
+    efficiency_markers = (
+        "less output tokens",
+        "fewer output tokens",
+        "less tokens",
+        "fewer tokens",
+        "reduced tokens",
+        "token savings",
+    )
+    if any(marker in raw for marker in efficiency_markers):
+        range_values = _extract_percentage_range(body.raw_text or "", efficiency_tokens)
+        single_value = _extract_percentage_near(body.raw_text or "", efficiency_tokens)
+        capabilities = _extract_capabilities(body.raw_text or "")
+        efficiency_settings: Dict[str, Any] = {
+            "claim_type": "efficiency_delta",
+            "metric": "output_tokens",
+            "comparand_models": comparators,
+            "range": None,
+            "capabilities": capabilities,
+        }
+        if range_values:
+            lo, hi = range_values
+            efficiency_settings["range"] = {"min": lo, "max": hi}
+        elif single_value is not None:
+            efficiency_settings["range"] = {"value": single_value}
+        add(
+            "efficiency",
+            "Token efficiency",
+            "token_delta",
+            None,
+            0.6,
+            settings={**settings, **efficiency_settings},
+            model_hint=primary_model,
+        )
+
+    comparative_suite = None
+    comparative_keywords = (
+        "performs better",
+        "outperforms",
+        "beats",
+        "wins",
+        "better than",
+    )
+    if comparative and any(keyword in raw for keyword in comparative_keywords) and "coding" in raw:
+        comparative_suite = "coding_competition"
+
+    def with_suite(base_settings: Dict[str, Any]) -> Dict[str, Any]:
+        if not comparative_suite:
+            return base_settings
+        merged = dict(base_settings)
+        merged["comparative_suite"] = comparative_suite
+        return merged
+
+    # Re-run coding additions to include suite info where applicable
+    if comparative_suite:
+        add(
+            "coding",
+            "Claimscope coding competition",
+            "pass_rate",
+            None,
+            0.7,
+            settings=with_suite(settings),
+            model_hint=primary_model,
+        )
 
     if not candidates:
         # default to a single reasoning-math claim

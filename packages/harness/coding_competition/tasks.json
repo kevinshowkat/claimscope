@@ -1,0 +1,28 @@
+[
+  {
+    "id": "balanced_parentheses",
+    "prompt": "Write a Python function `is_balanced(expr: str) -> bool` that returns True when the input string contains balanced parentheses (), [] and {}. Ignore any other characters.",
+    "tests": [
+      {"input": "is_balanced('([{}])')", "expected": "True"},
+      {"input": "is_balanced('([)]')", "expected": "False"},
+      {"input": "is_balanced('function() { return [1, 2, 3]; }')", "expected": "True"}
+    ]
+  },
+  {
+    "id": "merge_intervals",
+    "prompt": "Write a Python function `merge_intervals(intervals: list[list[int]]) -> list[list[int]]` that merges overlapping intervals and returns them sorted by start.",
+    "tests": [
+      {"input": "merge_intervals([[1,3],[2,6],[8,10],[15,18]])", "expected": "[[1, 6], [8, 10], [15, 18]]"},
+      {"input": "merge_intervals([[1,4],[4,5]])", "expected": "[[1, 5]]"}
+    ]
+  },
+  {
+    "id": "top_k_frequent",
+    "prompt": "Write a Python function `top_k_frequent(nums: list[int], k: int) -> list[int]` that returns the k most frequent integers sorted by frequency desc then value asc.",
+    "tests": [
+      {"input": "top_k_frequent([1,1,1,2,2,3], 2)", "expected": "[1, 2]"},
+      {"input": "top_k_frequent([4,4,4,4], 1)", "expected": "[4]"},
+      {"input": "top_k_frequent([1,2,3,4], 2)", "expected": "[1, 2]"}
+    ]
+  }
+]

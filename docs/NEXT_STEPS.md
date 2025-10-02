@@ -27,6 +27,8 @@ This doc tracks the outstanding tasks after staging the cAgent-12 harness.
 ## 5. Benchmark Validation (Marketing Claims)
 - [x] Implement SWE-bench Verified harness (`packages/harness/swebench`, `apps/api/worker/coding_swebench.py`).
 - [ ] Provide vetted prediction bundles + Docker guidance so the harness can run beyond fixtures.
+- [ ] Feed curated prompt bundles + comparator configs into the new token telemetry harness and publish sample receipts.
+- [ ] Expand coding competition task set and align comparator configs with marketing claims (GPT-5 vs o3).
 - [ ] Add GPQA runner and dataset packaging (`packages/harness/gpqa`, worker integration).
 - [ ] Vendor Aider Polyglot harness and efficiency telemetry hooks.
 - [ ] Extend HumanEval runner for full-suite mode and expose settings toggle.
