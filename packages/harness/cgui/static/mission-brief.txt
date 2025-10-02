@@ -1,0 +1,5 @@
+Aurora mission objectives
+
+1. Verify avionics
+2. Validate docking interface
+3. Final go/no-go review

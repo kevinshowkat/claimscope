@@ -10,6 +10,7 @@ export type RunStatus = {
   diffs?: Array<Record<string, any>>;
   ci?: { lower: number; upper: number; method: string } | null;
   artifacts?: { name: string; url: string }[];
+  validation_count?: number;
 };
 
 export type ClaimSummary = {

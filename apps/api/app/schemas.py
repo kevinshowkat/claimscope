@@ -28,6 +28,7 @@ class Claim(BaseModel):
     source_url: Optional[str] = None
     confidence: float
     created_at: Optional[str] = None
+    validation_count: int = 0
 
 class ModelConfig(BaseModel):
     provider: Literal["openai","anthropic","openrouter","vllm"]
@@ -64,6 +65,7 @@ class RunStatusResponse(BaseModel):
     ci: Optional[Dict[str, Any]] = None
     variance: Optional[Dict[str, Any]] = None
     trace_id: Optional[str] = None
+    validation_count: Optional[int] = None
 
 class RunSummary(BaseModel):
     run_id: str

@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS claims (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+ALTER TABLE claims
+  ADD COLUMN IF NOT EXISTS validation_count BIGINT DEFAULT 0;
+
+UPDATE claims SET validation_count = 0 WHERE validation_count IS NULL;
+
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   claim_id TEXT REFERENCES claims(id) ON DELETE CASCADE,

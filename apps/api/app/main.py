@@ -1,6 +1,7 @@
 import os
+import re
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -31,6 +32,110 @@ def _startup():
     # Run idempotent migrations
     run_migrations()
 
+COMPARATIVE_MARKERS = (
+    "best",
+    "better than",
+    "state of the art",
+    "state-of-the-art",
+    "beats",
+    "beat",
+    "outperforms",
+    "outperform",
+    "top",
+    "leading",
+    "vs",
+    "versus",
+    "compared to",
+)
+
+VISION_MARKERS = (
+    "vision",
+    "image",
+    "multimodal",
+    "multi-modal",
+    "mmmu",
+    "mmbench",
+    "perception",
+)
+
+
+def _contains_comparative_language(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in COMPARATIVE_MARKERS)
+
+
+def _extract_comparators(text: str) -> List[str]:
+    candidates: List[str] = []
+    lowered = text.lower()
+
+    patterns = [
+        r"compared to\s+([^.;]+)",
+        r"versus\s+([^.;]+)",
+        r"vs\.?\s+([^.;]+)",
+        r"than\s+([^.;]+)",
+        r"such as\s+([^.;]+)",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        for match in matches:
+            tokens = re.split(r",|\/| and | or |;", match)
+            for token in tokens:
+                cleaned = token.strip().strip("'\"")
+                if not cleaned:
+                    continue
+                # Skip generic placeholders
+                lowered_token = cleaned.lower()
+                if lowered_token in {"other models", "others", "other systems", "baseline"}:
+                    continue
+                if cleaned not in candidates:
+                    candidates.append(cleaned)
+
+    # Handle cases like "closed models, such as ..." by ensuring we captured capitalised words
+    if not candidates:
+        capitalised = re.findall(r"([A-Z][A-Za-z0-9\- ]{2,})", text)
+        for candidate in capitalised:
+            if candidate.lower() in lowered:
+                if candidate.lower() in lowered and candidate not in candidates:
+                    candidates.append(candidate)
+
+    return candidates[:5]
+
+
+def _detect_primary_model(text: str) -> Optional[str]:
+    patterns = [
+        r"claude opus\s*[0-9.]*",
+        r"claude sonnet\s*[0-9.]*",
+        r"claude haiku\s*[0-9.]*",
+        r"gpt-[^\s,.;]+",
+        r"llama\s*[0-9.]*\s*(?:vision)?\s*(?:[0-9]{1,2}b|[0-9]{1,2}\.?[0-9]*b)?",
+        r"gemini\s*[0-9.]*",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = match.group(0).strip()
+            # Normalise spacing
+            value = re.sub(r"\s+", " ", value)
+            return value
+    return None
+
+
+def _build_claim_settings(
+    *,
+    comparative: bool,
+    comparators: List[str],
+    requires_multimodal: bool,
+) -> Dict[str, Any]:
+    settings: Dict[str, Any] = {}
+    if comparative:
+        settings["requires_comparison"] = True
+        if comparators:
+            settings["comparand_models"] = comparators
+    if requires_multimodal:
+        settings["requires_multimodal_harness"] = True
+    return settings
+
+
 @app.post("/submit_claim", response_model=SubmitClaimResponse)
 def submit_claim(body: SubmitClaimRequest):
     if not body.raw_text and not body.url:
@@ -41,28 +146,61 @@ def submit_claim(body: SubmitClaimRequest):
     source_url = body.url
 
     candidates = []
-    def add(domain: str, task: str, metric: str, ref: float | None, conf: float):
-        candidates.append({
-            "model": "Claude Sonnet 4.5",  # as provided in example text (label only)
-            "domain": domain,
-            "task": task,
-            "metric": metric,
-            "reference_score": ref,
-            "confidence": conf,
-        })
+
+    def add(
+        domain: str,
+        task: str,
+        metric: str,
+        ref: Optional[float],
+        conf: float,
+        *,
+        settings: Optional[Dict[str, Any]] = None,
+        model_hint: Optional[str] = None,
+    ) -> None:
+        local_settings = dict(settings or {})
+        if domain != "vision" and "requires_multimodal_harness" in local_settings:
+            local_settings.pop("requires_multimodal_harness")
+        candidates.append(
+            {
+                "model": model_hint or _detect_primary_model(body.raw_text or "") or "Unspecified Model",
+                "domain": domain,
+                "task": task,
+                "metric": metric,
+                "reference_score": ref,
+                "confidence": conf,
+                "settings": local_settings,
+            }
+        )
+
+    primary_model = _detect_primary_model(body.raw_text or "")
+
+    comparative = _contains_comparative_language(body.raw_text or "")
+    comparators = _extract_comparators(body.raw_text or "") if comparative else []
+    if primary_model:
+        comparators = [c for c in comparators if c.lower() != primary_model.lower()]
+
+    requires_multimodal = any(marker in raw for marker in VISION_MARKERS)
+
+    settings = _build_claim_settings(
+        comparative=comparative,
+        comparators=comparators,
+        requires_multimodal=requires_multimodal,
+    )
 
     if "humaneval" in raw or "coding" in raw or "best coding" in raw:
-        add("coding", "HumanEval", "pass@1", 0.78, 0.85)
+        add("coding", "HumanEval", "pass@1", 0.78, 0.85, settings=settings, model_hint=primary_model)
     if "cagent" in raw or "agents" in raw or "complex agents" in raw:
-        add("agents", "cAgent-12", "success@1", 0.67, 0.8)
+        add("agents", "cAgent-12", "success@1", 0.67, 0.8, settings=settings, model_hint=primary_model)
     if "cgui" in raw or "computers" in raw or "browser" in raw or "computer-use" in raw:
-        add("computer-use", "cGUI-10", "task_success", 0.70, 0.8)
+        add("computer-use", "cGUI-10", "task_success", 0.70, 0.8, settings=settings, model_hint=primary_model)
+    if requires_multimodal or "vision" in raw or "image" in raw:
+        add("vision", "MMMU-mini", "accuracy", None, 0.7, settings=settings, model_hint=primary_model)
     if "gsm8k" in raw or "reasoning" in raw or "math" in raw:
-        add("reasoning-math", "GSM8K", "accuracy", 0.94, 0.9)
+        add("reasoning-math", "GSM8K", "accuracy", 0.94, 0.9, settings=settings, model_hint=primary_model)
 
     if not candidates:
         # default to a single reasoning-math claim
-        add("reasoning-math", "GSM8K", "accuracy", 0.94, 0.6)
+        add("reasoning-math", "GSM8K", "accuracy", 0.94, 0.6, settings=settings, model_hint=primary_model)
 
     out_ids: List[str] = []
     out_claims: List[Claim] = []
@@ -84,14 +222,27 @@ def submit_claim(body: SubmitClaimRequest):
                     "domain": c["domain"],
                     "task": c["task"],
                     "metric": c["metric"],
-                    "settings": _json.dumps({}),
+                    "settings": _json.dumps(c.get("settings") or {}),
                     "reference_score": c["reference_score"],
                     "source_url": source_url,
                     "confidence": c["confidence"],
                 },
             )
             out_ids.append(claim_id)
-            out_claims.append(Claim(id=claim_id, model=c["model"], domain=c["domain"], task=c["task"], metric=c["metric"], settings={}, reference_score=c["reference_score"], source_url=source_url, confidence=c["confidence"]))
+            out_claims.append(
+                Claim(
+                    id=claim_id,
+                    model=c["model"],
+                    domain=c["domain"],
+                    task=c["task"],
+                    metric=c["metric"],
+                    settings=c.get("settings") or {},
+                    reference_score=c["reference_score"],
+                    source_url=source_url,
+                    confidence=c["confidence"],
+                    validation_count=0,
+                )
+            )
         conn.commit()
 
     return SubmitClaimResponse(claim_ids=out_ids, claims=out_claims)
@@ -143,7 +294,17 @@ def run_reproduction(body: RunReproductionRequest):
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
 def get_run(run_id: str):
     with session() as conn:
-        row = conn.execute(text("SELECT * FROM runs WHERE id=:id"), {"id": run_id}).mappings().first()
+        row = conn.execute(
+            text(
+                """
+                SELECT r.*, c.validation_count
+                FROM runs r
+                JOIN claims c ON c.id = r.claim_id
+                WHERE r.id = :id
+                """
+            ),
+            {"id": run_id},
+        ).mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="run_id not found")
         arts = conn.execute(text("SELECT name, url, sha256 FROM artifacts WHERE run_id=:id ORDER BY created_at ASC"), {"id": run_id}).mappings().all()
@@ -158,6 +319,7 @@ def get_run(run_id: str):
             ci=(None if row.get("ci_lower") is None else {"lower": row["ci_lower"], "upper": row["ci_upper"], "method": "bootstrap"}),
             variance=None,
             trace_id=row.get("trace_id"),
+            validation_count=row.get("validation_count"),
         )
 
 @app.get("/claims/{claim_id}", response_model=ClaimWithRuns)
@@ -183,6 +345,7 @@ def get_claim(claim_id: str):
             source_url=c["source_url"],
             confidence=c["confidence"],
             created_at=str(c["created_at"]) if c.get("created_at") else None,
+            validation_count=int(c.get("validation_count") or 0),
             runs=[
                 RunSummary(
                     run_id=r["id"],

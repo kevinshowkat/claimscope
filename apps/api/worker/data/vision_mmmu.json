@@ -1,0 +1,85 @@
+{
+  "dataset_id": "mmmu-mini@claimscope-demo",
+  "dataset_digest": "a6f9b1c0f1a2d7c54b90c5c1d94f47c8bdee12f7a6bb47df9f5fd8c6fb8b8f21",
+  "metric": "accuracy",
+  "n": 24,
+  "models": {
+    "Llama 3.2 11B Vision": {
+      "accuracy": 0.74,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 3.45,
+        "cost_usd": 0.008,
+        "tokens_prompt": 16400,
+        "tokens_output": 2100
+      },
+      "latencies": [3.2, 3.5, 3.6, 3.4]
+    },
+    "Llama 3.2 90B Vision": {
+      "accuracy": 0.80,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 4.10,
+        "cost_usd": 0.024,
+        "tokens_prompt": 22900,
+        "tokens_output": 3400
+      },
+      "latencies": [4.0, 4.2, 4.1, 4.1]
+    },
+    "Claude 3 Haiku": {
+      "accuracy": 0.69,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 2.85,
+        "cost_usd": 0.006,
+        "tokens_prompt": 14200,
+        "tokens_output": 1800
+      },
+      "latencies": [2.9, 2.8, 2.9, 2.7]
+    },
+    "Claude 3 Sonnet": {
+      "accuracy": 0.77,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 3.30,
+        "cost_usd": 0.014,
+        "tokens_prompt": 17600,
+        "tokens_output": 2400
+      },
+      "latencies": [3.3, 3.2, 3.4, 3.3]
+    },
+    "Claude 3 Opus": {
+      "accuracy": 0.81,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 4.40,
+        "cost_usd": 0.032,
+        "tokens_prompt": 24800,
+        "tokens_output": 3600
+      },
+      "latencies": [4.5, 4.4, 4.3, 4.4]
+    },
+    "GPT-4o": {
+      "accuracy": 0.83,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 4.60,
+        "cost_usd": 0.030,
+        "tokens_prompt": 23600,
+        "tokens_output": 3500
+      },
+      "latencies": [4.5, 4.6, 4.8, 4.5]
+    },
+    "Gemini 1.5 Pro": {
+      "accuracy": 0.78,
+      "n": 24,
+      "ops": {
+        "p95_latency_s": 3.90,
+        "cost_usd": 0.020,
+        "tokens_prompt": 21000,
+        "tokens_output": 2800
+      },
+      "latencies": [3.8, 3.9, 4.0, 3.9]
+    }
+  }
+}

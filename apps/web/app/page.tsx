@@ -14,6 +14,7 @@ type Claim = {
   metric: string;
   reference_score?: number;
   confidence: number;
+  validation_count: number;
 };
 
 type SubmitResponse = {
@@ -185,6 +186,14 @@ const SHARE_THEME: Record<Verdict | "queued" | "running" | "idle", ShareTheme> =
   },
 };
 
+const WORKING_MESSAGES = [
+  "Weaving harness signals",
+  "Syncing trace manifests",
+  "Calibrating budget envelopes",
+  "Comparing baseline receipts",
+  "Capturing ops telemetry",
+];
+
 const MIN_INPUT_HEIGHT = 64;
 
 const DOMAIN_SUMMARY: Record<string, { success: string; caveat: string }> = {
@@ -228,6 +237,26 @@ function hexToRgba(hex: string, alpha: number): string {
   const g = (value >> 8) & 255;
   const b = value & 255;
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function darkenHex(hex: string, amount: number): string {
+  const sanitized = hex.replace(/^#/, "");
+  const normalized = sanitized.length === 3
+    ? sanitized
+        .split("")
+        .map((char) => char + char)
+        .join("")
+    : sanitized;
+
+  if (normalized.length !== 6) {
+    return hex;
+  }
+
+  const r = Math.max(0, Math.min(255, Math.round(Number.parseInt(normalized.slice(0, 2), 16) * (1 - amount))));
+  const g = Math.max(0, Math.min(255, Math.round(Number.parseInt(normalized.slice(2, 4), 16) * (1 - amount))));
+  const b = Math.max(0, Math.min(255, Math.round(Number.parseInt(normalized.slice(4, 6), 16) * (1 - amount))));
+
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
 function findSegmentRange(raw: string, fragment: string, fromIndex: number): { start: number; end: number } | null {
@@ -579,26 +608,50 @@ function buildSummary(claim: Claim, status: RunStatus | undefined) {
   const bullets: string[] = [];
   let headline = "Awaiting validation.";
 
-  if (current.status === "succeeded") {
-    headline = `All ${claim.task} checks passed.`;
-    const domainCopy = DOMAIN_SUMMARY[claim.domain];
-    if (domainCopy) {
-      bullets.push(domainCopy.success);
-      bullets.push(domainCopy.caveat);
+  const pushDiffBullets = () => {
+    if (!current.diffs || current.diffs.length === 0) return;
+    for (const diff of current.diffs) {
+      if (!diff) continue;
+      const reason = typeof diff.reason === "string" ? diff.reason.replace(/_/g, " ") : "note";
+      const message = typeof diff.message === "string" ? diff.message : JSON.stringify(diff);
+      bullets.push(`${reason}: ${message}`);
     }
-    if (current.ops?.p95_latency_s) {
-      bullets.push(
-        `Runs completed with roughly ${current.ops.p95_latency_s.toFixed(2)}s p95 latency and no service issues.`,
-      );
+  };
+
+  if (current.status === "succeeded") {
+    const statusLabel = current.status_label ?? "Replicated";
+    if (statusLabel === "Replicated") {
+      headline = `All ${claim.task} checks passed.`;
+      const domainCopy = DOMAIN_SUMMARY[claim.domain];
+      if (domainCopy) {
+        bullets.push(domainCopy.success);
+        bullets.push(domainCopy.caveat);
+      }
+      if (current.ops?.p95_latency_s) {
+        bullets.push(
+          `Runs completed with roughly ${current.ops.p95_latency_s.toFixed(2)}s p95 latency and no service issues.`,
+        );
+      }
+      pushDiffBullets();
+    } else if (statusLabel === "Underspecified") {
+      headline = "Evidence is incomplete for this claim.";
+      bullets.push("We need comparative or grounding data before calling this true.");
+      pushDiffBullets();
+      if (current.ops?.p95_latency_s) {
+        bullets.push(
+          `Harness run finished (p95 ${current.ops.p95_latency_s.toFixed(2)}s), but verdict is withheld.`,
+        );
+      }
+    } else {
+      headline = `${statusLabel} outcome for ${claim.task}.`;
+      pushDiffBullets();
+      if (current.ops?.p95_latency_s) {
+        bullets.push(`Run completed with p95 latency ${current.ops.p95_latency_s.toFixed(2)}s.`);
+      }
     }
   } else if (current.status === "failed") {
     headline = `Validation failed for ${claim.task}.`;
-    if (current.diffs && current.diffs.length > 0) {
-      for (const diff of current.diffs) {
-        const reason = typeof diff.reason === "string" ? diff.reason.replace(/_/g, " ") : "issue";
-        bullets.push(`${reason}: ${diff.message ?? JSON.stringify(diff)}`);
-      }
-    }
+    pushDiffBullets();
   } else if (current.status === "running") {
     headline = `Running ${claim.task} harness…`;
     bullets.push("The evaluation is still gathering evidence; results will update automatically.");
@@ -681,6 +734,10 @@ function resolveVerdict(claim: Claim | undefined, status: RunStatus | undefined)
     case "running":
       return "likely_true";
     case "succeeded": {
+      const statusLabel = status.status_label?.toLowerCase();
+      if (statusLabel === "underspecified") {
+        return "no_evidence";
+      }
       const value = status.scores?.value;
       const reference = typeof claim?.reference_score === "number" ? claim.reference_score : undefined;
       if (typeof value === "number" && typeof reference === "number") {
@@ -736,6 +793,8 @@ export default function Page() {
   const [claims, setClaims] = useState<Claim[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [runStatus, setRunStatus] = useState<Record<string, RunStatus | undefined>>({});
+  const [workingLabelIndex, setWorkingLabelIndex] = useState<Record<string, number>>({});
+  const [localValidationCounts, setLocalValidationCounts] = useState<Record<string, number>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [openClaimId, setOpenClaimId] = useState<string | null>(null);
   const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT);
@@ -743,6 +802,8 @@ export default function Page() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const highlightContentRef = useRef<HTMLDivElement | null>(null);
   const [isFocused, setIsFocused] = useState(false);
+  const completedRunsRef = useRef<Set<string>>(new Set());
+  const runningClaimsRef = useRef<string[]>([]);
 
   const updateInputHeight = useCallback(() => {
     const textarea = textareaRef.current;
@@ -971,6 +1032,64 @@ export default function Page() {
   useEffect(() => {
     syncHighlightScroll(textareaRef.current);
   }, [raw, segments, syncHighlightScroll]);
+  const runningClaimIds = useMemo(
+    () => claims.filter((claim) => runStatus[claim.id]?.status === "running").map((claim) => claim.id),
+    [claims, runStatus],
+  );
+
+  const hasRunning = runningClaimIds.length > 0;
+
+  useEffect(() => {
+    runningClaimsRef.current = runningClaimIds;
+    const runningSet = new Set(runningClaimIds);
+
+    setWorkingLabelIndex((previous) => {
+      const next: Record<string, number> = { ...previous };
+      let changed = false;
+
+      runningClaimIds.forEach((id) => {
+        if (next[id] === undefined) {
+          next[id] = 0;
+          changed = true;
+        }
+      });
+
+      Object.keys(next).forEach((id) => {
+        if (!runningSet.has(id)) {
+          delete next[id];
+          changed = true;
+        }
+      });
+
+      return changed ? next : previous;
+    });
+  }, [runningClaimIds]);
+
+  useEffect(() => {
+    if (!hasRunning) {
+      return () => {};
+    }
+
+    const timer = window.setInterval(() => {
+      const ids = runningClaimsRef.current;
+      if (ids.length === 0) {
+        return;
+      }
+
+      setWorkingLabelIndex((previous) => {
+        const next: Record<string, number> = { ...previous };
+        let changed = false;
+        ids.forEach((id) => {
+          const current = next[id] ?? 0;
+          next[id] = (current + 1) % WORKING_MESSAGES.length;
+          changed = true;
+        });
+        return changed ? next : previous;
+      });
+    }, 2600);
+
+    return () => window.clearInterval(timer);
+  }, [hasRunning]);
 
   function canRun(claimId: string) {
     const current = runStatus[claimId]?.status;
@@ -995,12 +1114,23 @@ export default function Page() {
         throw new Error(await response.text());
       }
       const data: SubmitResponse = await response.json();
-      setClaims(data.claims);
-      setSegments(extractSegments(raw, data.claims));
-      if (data.claims.length > 0) {
-        setOpenClaimId(data.claims[0].id);
+      const normalizedClaims = data.claims.map((claim) => ({
+        ...claim,
+        validation_count: claim.validation_count ?? 0,
+      }));
+      setLocalValidationCounts((previous) => {
+        const next = { ...previous };
+        normalizedClaims.forEach((claim) => {
+          next[claim.id] = claim.validation_count ?? 0;
+        });
+        return next;
+      });
+      setClaims(normalizedClaims);
+      setSegments(extractSegments(raw, normalizedClaims));
+      if (normalizedClaims.length > 0) {
+        setOpenClaimId(normalizedClaims[0].id);
       }
-      for (const claim of data.claims) {
+      for (const claim of normalizedClaims) {
         void runRepro(claim, { auto: true });
       }
     } catch (error) {
@@ -1013,6 +1143,8 @@ export default function Page() {
 
   async function runRepro(claim: Claim, options: { auto?: boolean } = {}) {
     if (!canRun(claim.id) && !options.auto) return;
+
+    let runId = "";
 
     setRunStatus((previous) => ({
       ...previous,
@@ -1042,7 +1174,7 @@ export default function Page() {
         throw new Error(await response.text());
       }
       const data: RunResponse = await response.json();
-      const runId = data.run_id;
+      runId = data.run_id;
 
       setRunStatus((previous) => ({
         ...previous,
@@ -1051,6 +1183,9 @@ export default function Page() {
           status: "queued",
         },
       }));
+      if (runId) {
+        completedRunsRef.current.delete(runId);
+      }
 
       async function poll() {
         try {
@@ -1059,6 +1194,38 @@ export default function Page() {
             throw new Error(await pollResponse.text());
           }
           const status: RunStatus = await pollResponse.json();
+          const updatedCount = (() => {
+            const serverValue = typeof status.validation_count === "number" ? status.validation_count : undefined;
+            const baseline =
+              serverValue ?? localValidationCounts[claim.id] ?? claim.validation_count ?? 0;
+
+            if (status.status === "succeeded" && !completedRunsRef.current.has(runId)) {
+              completedRunsRef.current.add(runId);
+              if (serverValue === undefined) {
+                return baseline + 1;
+              }
+            }
+
+            return serverValue ?? baseline;
+          })();
+
+          if (status.status === "succeeded" && typeof status.validation_count !== "number") {
+            status.validation_count = updatedCount;
+          }
+
+          setLocalValidationCounts((previous) => ({
+            ...previous,
+            [claim.id]: updatedCount,
+          }));
+
+          setClaims((previous) =>
+            previous.map((existing) => (
+              existing.id === claim.id && existing.validation_count !== updatedCount
+                ? { ...existing, validation_count: updatedCount }
+                : existing
+            )),
+          );
+
           setRunStatus((previous) => ({ ...previous, [claim.id]: status }));
           if (status.status !== "succeeded" && status.status !== "failed") {
             setTimeout(poll, 900);
@@ -1073,6 +1240,9 @@ export default function Page() {
               diffs: [{ reason: "polling_error", message: String(error) }],
             },
           }));
+          if (runId) {
+            completedRunsRef.current.delete(runId);
+          }
         }
       }
 
@@ -1087,6 +1257,9 @@ export default function Page() {
           diffs: [{ reason: "run_error", message: String(error) }],
         },
       }));
+      if (runId) {
+        completedRunsRef.current.delete(runId);
+      }
     }
   }
 
@@ -1148,11 +1321,11 @@ export default function Page() {
                 const status = runStatus[claim.id];
                 const statusKey: RunStatus["status"] | "idle" = status?.status ?? "idle";
                 const verdict = resolveVerdict(claim, status);
-                const chipLabel = statusKey === "queued" || statusKey === "running"
-                  ? STATUS_META[statusKey].label
-                  : VERDICT_META[verdict].label;
-                const shareThemeKey: keyof typeof SHARE_THEME =
-                  statusKey === "queued"
+            const chipLabel = statusKey === "queued" || statusKey === "running"
+              ? STATUS_META[statusKey].label
+              : VERDICT_META[verdict].label;
+            const shareThemeKey: keyof typeof SHARE_THEME =
+              statusKey === "queued"
                     ? "queued"
                     : statusKey === "running"
                       ? "running"
@@ -1212,6 +1385,20 @@ export default function Page() {
               })
               .filter((entry): entry is { reason?: string; message: string } => Boolean(entry?.message));
             const shareFooterItems = [claim.domain, claim.task].filter(Boolean);
+            const validationCount = Math.max(
+              0,
+              status?.validation_count ?? localValidationCounts[claim.id] ?? claim.validation_count ?? 0,
+            );
+            const formattedValidationCount = validationCount.toLocaleString();
+            const validationBadgeText = validationCount === 1 ? "Validated 1×" : `Validated ${formattedValidationCount}×`;
+            const badgeStyle = {
+              background: hexToRgba(shareTheme.accentSecondary, 0.45),
+              color: shareTheme.text,
+              boxShadow: `0 0 0 1px ${hexToRgba(shareTheme.accentSecondary, 0.55)} inset`,
+            } as const;
+            const isRunning = statusKey === "running";
+            const progressIndicator = null;
+            const workingLabel = WORKING_MESSAGES[workingLabelIndex[claim.id] ?? 0];
 
                 return (
                   <div
@@ -1226,6 +1413,8 @@ export default function Page() {
                       <span className="share-claim-title">{quotedSnippet}</span>
                     </div>
 
+                    {progressIndicator}
+
                     <div className="share-claim-text">
                       <span
                         className="share-chip"
@@ -1239,9 +1428,19 @@ export default function Page() {
                       </span>
                     </div>
 
-                    <div className="share-headline" style={{ borderColor: hexToRgba(shareTheme.accentPrimary, 0.55) }}>
-                      <span style={{ color: "#FFFFFF" }}>{summary.headline}</span>
-                    </div>
+                    {isRunning ? (
+                      <div className="share-working">
+                        <div className="share-working-glow" aria-hidden="true" />
+                        <div className="share-working-content">
+                          <span className="share-working-spinner" aria-hidden="true" />
+                          <span className="share-working-text">{workingLabel}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="share-headline" style={{ borderColor: hexToRgba(shareTheme.accentPrimary, 0.55) }}>
+                        <span style={{ color: "#FFFFFF" }}>{summary.headline}</span>
+                      </div>
+                    )}
 
                     {summary.bullets.length > 0 && (
                       <ul className="share-summary-list">
@@ -1262,15 +1461,18 @@ export default function Page() {
                       </ul>
                     )}
 
-                    {shareFooterItems.length > 0 && (
-                      <div className="share-footer">
+                    <div className="share-footer">
+                      <div className="share-footer-left">
                         {shareFooterItems.map((item, index) => (
                           <span key={`${item}-${index}`} className="share-footer-item">
                             {item}
                           </span>
                         ))}
                       </div>
-                    )}
+                      <span className="share-footer-badge" style={badgeStyle}>
+                        {validationBadgeText}
+                      </span>
+                    </div>
 
                   </div>
                 );
@@ -1429,10 +1631,11 @@ export default function Page() {
 
         .primary {
           padding: 14px 42px;
-          background: linear-gradient(135deg, #2EA043, #3FB950);
+          background: linear-gradient(135deg, #F8FAFC, #E2E8F0);
           color: #0B0F14;
           font-size: 1.05rem;
-          box-shadow: 0 16px 32px rgba(46, 160, 67, 0.35);
+          box-shadow: 0 16px 32px rgba(148, 163, 184, 0.25);
+          border: 1px solid rgba(226, 232, 240, 0.85);
         }
 
         .secondary {
@@ -1558,6 +1761,22 @@ export default function Page() {
           gap: 8px;
         }
 
+        .share-progress {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 0.85rem;
+          letter-spacing: 0.01em;
+        }
+
+        .share-progress-dot {
+          width: 9px;
+          height: 9px;
+          border-radius: 50%;
+          animation: pulse 1.4s ease-in-out infinite;
+          box-shadow: 0 0 12px rgba(148, 163, 184, 0.35);
+        }
+
         .share-chip {
           display: inline-flex;
           align-items: center;
@@ -1585,6 +1804,50 @@ export default function Page() {
           gap: 8px;
         }
 
+        .share-working {
+          position: relative;
+          overflow: hidden;
+          border-radius: 14px;
+          padding: 14px 18px;
+          border: 1px solid rgba(255, 255, 255, 0.25);
+          backdrop-filter: blur(12px);
+          background: rgba(11, 20, 35, 0.65);
+        }
+
+        .share-working-glow {
+          position: absolute;
+          inset: -60%;
+          background: conic-gradient(from 90deg, rgba(99, 102, 241, 0.35), rgba(20, 184, 166, 0.18), rgba(129, 140, 248, 0.45), rgba(20, 184, 166, 0.18), rgba(99, 102, 241, 0.35));
+          animation: share-orbit 6s linear infinite;
+          opacity: 0.65;
+          filter: blur(32px);
+        }
+
+        .share-working-content {
+          position: relative;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          color: #f8fafc;
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          font-size: 0.78rem;
+          font-weight: 600;
+        }
+
+        .share-working-spinner {
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          border: 2px solid rgba(248, 250, 252, 0.35);
+          border-top-color: #FFFFFF;
+          animation: share-spin 1.4s linear infinite;
+        }
+
+        .share-working-text {
+          text-shadow: 0 0 18px rgba(148, 163, 184, 0.6);
+        }
+
         .share-rerun {
           background: rgba(11, 15, 20, 0.25);
           border-color: rgba(255, 255, 255, 0.22);
@@ -1605,16 +1868,35 @@ export default function Page() {
         .share-footer {
           margin-top: 18px;
           display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
           font-size: 0.85rem;
           color: rgba(248, 250, 252, 0.75);
+        }
+
+        .share-footer-left {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
         }
 
         .share-footer-item {
           background: rgba(15, 23, 42, 0.55);
           border-radius: 999px;
           padding: 6px 12px;
+        }
+
+        .share-footer-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 999px;
+          padding: 6px 12px;
+          font-weight: 600;
+          font-size: 0.85rem;
+          min-width: 128px;
+          text-align: right;
         }
 
         .share-summary-list {
@@ -1684,6 +1966,24 @@ export default function Page() {
           100% {
             transform: scale(1.35);
             opacity: 0;
+          }
+        }
+
+        @keyframes share-orbit {
+          0% {
+            transform: rotate(0deg);
+          }
+          100% {
+            transform: rotate(360deg);
+          }
+        }
+
+        @keyframes share-spin {
+          0% {
+            transform: rotate(0deg);
+          }
+          100% {
+            transform: rotate(360deg);
           }
         }
 

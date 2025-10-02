@@ -13,6 +13,7 @@ from .gui_cgui import run_cgui_suite
 from .logging_utils import get_logger
 from .reasoning_gsm8k import bootstrap_ci, run_gsm8k_subset
 from .trace_manifest import record_trace
+from .vision_mmmu import MMMU_DATASET_DIGEST, MMMU_DATASET_ID, MMMUDataError, run_mmmu_subset
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/claimscope")
 engine = create_engine(DATABASE_URL, future=True)
@@ -21,10 +22,15 @@ logger = get_logger("worker")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HUMANEVAL_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "coding_humaneval.py"]
 GSM8K_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "reasoning_gsm8k.py"]
+VISION_PATHS = [
+    REPO_ROOT / "apps" / "api" / "worker" / "vision_mmmu.py",
+    REPO_ROOT / "apps" / "api" / "worker" / "data" / "vision_mmmu.json",
+]
 
 ESTIMATED_LLM_COSTS: Dict[str, float] = {
     "coding": 0.02,
     "reasoning-math": 0.02,
+    "vision": 0.02,
 }
 
 SEED_RESULTS: Dict[str, Dict[str, Any]] = {
@@ -109,6 +115,54 @@ def _record_failure(
     )
     conn.commit()
 
+
+def _mark_underspecified(
+    conn,
+    run_id: str,
+    trace_id: str,
+    *,
+    reason: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    ops: Optional[Dict[str, Any]] = None,
+) -> None:
+    payload = {"reason": reason, "message": message}
+    if details:
+        payload.update(details)
+    conn.execute(
+        text(
+            """
+            UPDATE runs
+            SET status='succeeded',
+                score_value=NULL,
+                ci_lower=NULL,
+                ci_upper=NULL,
+                ops=CAST(:ops AS JSONB),
+                diffs=CAST(:diffs AS JSONB),
+                status_label='Underspecified',
+                trace_id=:trace_id,
+                completed_at=now()
+            WHERE id=:id
+            """
+        ),
+        {
+            "id": run_id,
+            "trace_id": trace_id,
+            "ops": json.dumps(ops or {}),
+            "diffs": json.dumps([payload]),
+        },
+    )
+    conn.commit()
+
+def _increment_validation_count(conn, claim_id: str) -> None:
+    conn.execute(
+        text(
+            "UPDATE claims SET validation_count = COALESCE(validation_count, 0) + 1 WHERE id = :id"
+        ),
+        {"id": claim_id},
+    )
+
+
 def _coerce_budget(model_cfg: Dict[str, Any]) -> float:
     raw = model_cfg.get("budget_usd", 0.0)
     try:
@@ -121,7 +175,7 @@ def _load_run_context(conn, run_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute(
         text(
             """
-            SELECT c.domain, c.task, r.model_config
+            SELECT c.domain, c.task, c.metric, c.model, c.settings, r.model_config
             FROM runs r
             JOIN claims c ON c.id = r.claim_id
             WHERE r.id = :run_id
@@ -138,7 +192,21 @@ def _load_run_context(conn, run_id: str) -> Optional[Dict[str, Any]]:
             model_cfg = json.loads(model_cfg)
         except json.JSONDecodeError:
             model_cfg = {}
-    return {"domain": row["domain"], "task": row["task"], "model_config": model_cfg or {}}
+    settings = row["settings"]
+    if isinstance(settings, str):
+        try:
+            settings = json.loads(settings)
+        except json.JSONDecodeError:
+            settings = {}
+
+    return {
+        "domain": row["domain"],
+        "task": row["task"],
+        "metric": row["metric"],
+        "model": row.get("model"),
+        "settings": settings or {},
+        "model_config": model_cfg or {},
+    }
 
 
 def process_one(run_id: str, claim_id: str) -> None:
@@ -152,9 +220,30 @@ def process_one(run_id: str, claim_id: str) -> None:
 
         domain = ctx["domain"] or "coding"
         task = ctx["task"] or ""
+        metric = ctx.get("metric")
+        settings = ctx.get("settings") or {}
         model_cfg = ctx["model_config"]
+        model_name = ctx.get("model") or "Unspecified Model"
         budget = _coerce_budget(model_cfg)
         trace_id = f"tr_{uuid.uuid4().hex[:6]}"
+
+        requires_comparison = bool(settings.get("requires_comparison"))
+        comparators = settings.get("comparand_models") or []
+        if isinstance(comparators, str):
+            comparators = [comparators]
+        requires_multimodal = bool(settings.get("requires_multimodal_harness"))
+
+        def _comparison_details() -> Dict[str, Any]:
+            details: Dict[str, Any] = {
+                "domain": domain,
+                "task": task,
+            }
+            if metric:
+                details["metric"] = metric
+            details["model"] = model_name
+            if comparators:
+                details["expected_comparators"] = comparators
+            return details
 
         def _guard_cost(expected_cost: float) -> bool:
             if expected_cost <= 0:
@@ -198,6 +287,168 @@ def process_one(run_id: str, claim_id: str) -> None:
             conn.commit()
             return False
 
+        if domain == "vision":
+            if not _guard_cost(ESTIMATED_LLM_COSTS.get(domain, 0.0)):
+                return
+            try:
+                res, latencies, report = run_mmmu_subset(
+                    model_name=model_name,
+                    comparators=comparators,
+                )
+            except MMMUDataError as exc:
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="missing_fixture",
+                    message=str(exc),
+                    details=_comparison_details(),
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::missing_mmmu_fixture",
+                    dataset_id=MMMU_DATASET_ID,
+                    params={
+                        "domain": domain,
+                        "task": task,
+                        "metric": metric,
+                        "comparators": comparators,
+                        "budget_usd": budget,
+                        "model": model_name,
+                    },
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "missing_fixture"},
+                )
+                return
+
+            metric_key = report.get("metric", "accuracy")
+            available = report.get("available") or {}
+            missing = report.get("missing") or []
+            leaderboard = report.get("leaderboard") or []
+
+            status_label = "Replicated"
+            diff_entries: list[Dict[str, Any]] = []
+
+            if leaderboard:
+                diff_entries.append({"leaderboard": leaderboard})
+
+            if missing:
+                status_label = "Underspecified"
+                diff_entries.append(
+                    {
+                        "reason": "missing_comparator",
+                        "message": "Comparative baseline not found in MMMU fixtures.",
+                        "missing": missing,
+                        **_comparison_details(),
+                    }
+                )
+
+            if requires_comparison and not missing:
+                worse_than = {}
+                for name, data in available.items():
+                    comparator_score = data.get(metric_key)
+                    if comparator_score is None:
+                        continue
+                    if comparator_score > res["score_value"]:
+                        worse_than[name] = comparator_score
+                if worse_than:
+                    status_label = "Not Reproduced"
+                    diff_entries.append(
+                        {
+                            "reason": "comparison_deficit",
+                            "message": "Claim model underperforms one or more comparators on MMMU.",
+                            "comparators": worse_than,
+                            **_comparison_details(),
+                        }
+                    )
+                else:
+                    diff_entries.append(
+                        {
+                            "reason": "comparison_pass",
+                            "message": "Claim model meets or exceeds provided comparators on MMMU.",
+                            **_comparison_details(),
+                        }
+                    )
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE runs SET status=:status, score_value=:score_value, ci_lower=NULL, ci_upper=NULL,
+                      ops=CAST(:ops AS JSONB), diffs=CAST(:diffs AS JSONB), status_label=:status_label,
+                      trace_id=:trace_id, completed_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "status": "succeeded",
+                    "score_value": res["score_value"],
+                    "ops": json.dumps(res.get("ops") or {}),
+                    "diffs": json.dumps(diff_entries),
+                    "status_label": status_label,
+                    "trace_id": trace_id,
+                },
+            )
+
+            record_trace(
+                conn,
+                run_id,
+                harness_cmd="python -m worker.vision_mmmu",
+                harness_paths=VISION_PATHS,
+                dataset_id=MMMU_DATASET_ID,
+                dataset_digest=MMMU_DATASET_DIGEST,
+                params={
+                    "domain": domain,
+                    "task": task,
+                    "metric": metric,
+                    "model": model_name,
+                    "comparators": comparators,
+                    "budget_usd": budget,
+                },
+                seeds={"mode": "offline_fixture"},
+                tokens_prompt=int(res.get("ops", {}).get("tokens_prompt") or 0),
+                tokens_output=int(res.get("ops", {}).get("tokens_output") or 0),
+                latencies=latencies,
+                cost_usd=float(res.get("ops", {}).get("cost_usd") or 0.0),
+            )
+            _increment_validation_count(conn, claim_id)
+            conn.commit()
+            return
+
+        if requires_multimodal:
+            _mark_underspecified(
+                conn,
+                run_id,
+                trace_id,
+                reason="missing_multimodal_support",
+                message="Claim expects multimodal evaluation but the target domain lacks a vision harness.",
+                details=_comparison_details(),
+            )
+            record_trace(
+                conn,
+                run_id,
+                harness_cmd="guard::missing_multimodal_support",
+                dataset_id="guard::vision",
+                params={
+                    "domain": domain,
+                    "task": task,
+                    "metric": metric,
+                    "comparators": comparators,
+                    "budget_usd": budget,
+                    "model": model_name,
+                },
+                seeds={},
+                tokens_prompt=0,
+                tokens_output=0,
+                cost_usd=0.0,
+                errors={"reason": "missing_multimodal_support"},
+            )
+            return
+
         # Real GSM8K path
         if domain == "reasoning-math" and task.lower().startswith("gsm8k"):
             if not _guard_cost(ESTIMATED_LLM_COSTS.get(domain, 0.0)):
@@ -211,6 +462,17 @@ def process_one(run_id: str, claim_id: str) -> None:
                 k = int(round(acc * n))
                 vals = [1]*k + [0]*(n-k)
                 lo, hi = bootstrap_ci(vals, n=n, reps=1000, seed=1234)
+                status_label = "Replicated"
+                diff_entries: list[Dict[str, Any]] = []
+                if requires_comparison:
+                    status_label = "Underspecified"
+                    diff_entries.append(
+                        {
+                            "reason": "missing_comparator",
+                            "message": "Comparative claim evaluated without competitor baselines.",
+                            **_comparison_details(),
+                        }
+                    )
                 conn.execute(
                     text(
                         """
@@ -227,8 +489,8 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "ci_lower": lo,
                         "ci_upper": hi,
                         "ops": json.dumps(res["ops"]),
-                        "diffs": json.dumps([]),
-                        "status_label": "Replicated",
+                        "diffs": json.dumps(diff_entries),
+                        "status_label": status_label,
                         "trace_id": trace_id,
                     },
                 )
@@ -238,13 +500,19 @@ def process_one(run_id: str, claim_id: str) -> None:
                     harness_cmd="python -m worker.reasoning_gsm8k",
                     harness_paths=GSM8K_PATHS,
                     dataset_id="gsm8k@subset-25",
-                    params={"n": n, "temperature": 0.2, "budget_usd": budget},
+                    params={
+                        "n": n,
+                        "temperature": 0.2,
+                        "budget_usd": budget,
+                        "comparators": comparators if requires_comparison else [],
+                    },
                     seeds={"sample_seed": 1234},
                     tokens_prompt=int(res["ops"].get("tokens_prompt") or 0),
                     tokens_output=int(res["ops"].get("tokens_output") or 0),
                     latencies=lats,
                     cost_usd=float(res["ops"].get("cost_usd", 0.0)),
                 )
+                _increment_validation_count(conn, claim_id)
                 conn.commit()
                 return
             except Exception as e:
@@ -274,6 +542,17 @@ def process_one(run_id: str, claim_id: str) -> None:
                 k = int(round(acc * n))
                 vals = [1]*k + [0]*(n-k)
                 lo, hi = bootstrap_ci(vals, n=n, reps=1000, seed=1234)
+                status_label = "Replicated"
+                diff_entries: list[Dict[str, Any]] = []
+                if requires_comparison:
+                    status_label = "Underspecified"
+                    diff_entries.append(
+                        {
+                            "reason": "missing_comparator",
+                            "message": "Comparative claim evaluated without competitor baselines.",
+                            **_comparison_details(),
+                        }
+                    )
                 conn.execute(
                     text(
                         """
@@ -290,8 +569,8 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "ci_lower": lo,
                         "ci_upper": hi,
                         "ops": json.dumps(res["ops"]),
-                        "diffs": json.dumps([]),
-                        "status_label": "Replicated",
+                        "diffs": json.dumps(diff_entries),
+                        "status_label": status_label,
                         "trace_id": trace_id,
                     },
                 )
@@ -301,13 +580,20 @@ def process_one(run_id: str, claim_id: str) -> None:
                     harness_cmd="python -m worker.coding_humaneval",
                     harness_paths=HUMANEVAL_PATHS,
                     dataset_id="openai/humaneval",
-                    params={"n": n, "temperature": 0.0, "max_tokens": 1024, "budget_usd": budget},
+                    params={
+                        "n": n,
+                        "temperature": 0.0,
+                        "max_tokens": 1024,
+                        "budget_usd": budget,
+                        "comparators": comparators if requires_comparison else [],
+                    },
                     seeds={"sample_seed": 1234},
                     tokens_prompt=int(res["ops"].get("tokens_prompt") or 0),
                     tokens_output=int(res["ops"].get("tokens_output") or 0),
                     latencies=lats,
                     cost_usd=float(res["ops"].get("cost_usd", 0.0)),
                 )
+                _increment_validation_count(conn, claim_id)
                 conn.commit()
                 return
             except Exception as e:
@@ -329,6 +615,17 @@ def process_one(run_id: str, claim_id: str) -> None:
         if domain == "agents" and task.lower().startswith("cagent"):
             try:
                 res, durations, artifact, metadata = run_cagent_suite()
+                status_label = "Replicated"
+                diff_entries: list[Dict[str, Any]] = [{"metrics": res["metrics"]}]
+                if requires_comparison:
+                    status_label = "Underspecified"
+                    diff_entries.append(
+                        {
+                            "reason": "missing_comparator",
+                            "message": "Comparative claim evaluated without competitor baselines.",
+                            **_comparison_details(),
+                        }
+                    )
                 conn.execute(
                     text(
                         """
@@ -348,8 +645,8 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "status": "succeeded",
                         "score_value": res["score_value"],
                         "ops": json.dumps(res["ops"]),
-                        "diffs": json.dumps([{"metrics": res["metrics"]}]),
-                        "status_label": "Replicated",
+                        "diffs": json.dumps(diff_entries),
+                        "status_label": status_label,
                         "trace_id": trace_id,
                     },
                 )
@@ -378,13 +675,18 @@ def process_one(run_id: str, claim_id: str) -> None:
                     harness_digest=metadata.get("harness_hash"),
                     dataset_id=metadata.get("dataset_id"),
                     dataset_digest=metadata.get("dataset_hash"),
-                    params={**metadata.get("params", {}), "budget_usd": budget},
+                    params={
+                        **metadata.get("params", {}),
+                        "budget_usd": budget,
+                        "comparators": comparators if requires_comparison else [],
+                    },
                     seeds=metadata.get("seeds"),
                     tokens_prompt=0,
                     tokens_output=0,
                     latencies=[d / 1000.0 for d in durations],
                     cost_usd=0.0,
                 )
+                _increment_validation_count(conn, claim_id)
                 conn.commit()
                 return
             except Exception as exc:
@@ -401,6 +703,17 @@ def process_one(run_id: str, claim_id: str) -> None:
         if domain == "computer-use" and task.lower().startswith("cgui"):
             try:
                 res, durations, artifact, metadata = run_cgui_suite()
+                status_label = "Replicated"
+                diff_entries: list[Dict[str, Any]] = [{"metrics": res["metrics"]}]
+                if requires_comparison:
+                    status_label = "Underspecified"
+                    diff_entries.append(
+                        {
+                            "reason": "missing_comparator",
+                            "message": "Comparative claim evaluated without competitor baselines.",
+                            **_comparison_details(),
+                        }
+                    )
                 conn.execute(
                     text(
                         """
@@ -420,8 +733,8 @@ def process_one(run_id: str, claim_id: str) -> None:
                         "status": "succeeded",
                         "score_value": res["score_value"],
                         "ops": json.dumps(res["ops"]),
-                        "diffs": json.dumps([{"metrics": res["metrics"]}]),
-                        "status_label": "Replicated",
+                        "diffs": json.dumps(diff_entries),
+                        "status_label": status_label,
                         "trace_id": trace_id,
                     },
                 )
@@ -450,13 +763,18 @@ def process_one(run_id: str, claim_id: str) -> None:
                     harness_digest=metadata.get("harness_hash"),
                     dataset_id=metadata.get("dataset_id"),
                     dataset_digest=metadata.get("dataset_hash"),
-                    params={**metadata.get("params", {}), "budget_usd": budget},
+                    params={
+                        **metadata.get("params", {}),
+                        "budget_usd": budget,
+                        "comparators": comparators if requires_comparison else [],
+                    },
                     seeds=metadata.get("seeds"),
                     tokens_prompt=0,
                     tokens_output=0,
                     latencies=durations,
                     cost_usd=0.0,
                 )
+                _increment_validation_count(conn, claim_id)
                 conn.commit()
                 return
             except Exception as exc:
@@ -472,6 +790,20 @@ def process_one(run_id: str, claim_id: str) -> None:
 
         # Fallback to seeded paths for other domains
         seed = SEED_RESULTS.get(domain, SEED_RESULTS["coding"])
+        status_label = seed.get("status_label", "Replicated")
+        diff_entries: list[Dict[str, Any]] = []
+        for entry in seed.get("diffs", []):
+            if isinstance(entry, dict):
+                diff_entries.append(dict(entry))
+        if requires_comparison:
+            status_label = "Underspecified"
+            diff_entries.append(
+                {
+                    "reason": "missing_comparator",
+                    "message": "Comparative claim evaluated without competitor baselines.",
+                    **_comparison_details(),
+                }
+            )
         conn.execute(
             text(
                 """
@@ -488,8 +820,8 @@ def process_one(run_id: str, claim_id: str) -> None:
                 "ci_lower": seed["ci_lower"],
                 "ci_upper": seed["ci_upper"],
                 "ops": json.dumps(seed["ops"]),
-                "diffs": json.dumps(seed["diffs"]),
-                "status_label": seed["status_label"],
+                "diffs": json.dumps(diff_entries),
+                "status_label": status_label,
                 "trace_id": trace_id,
             },
         )
@@ -517,12 +849,18 @@ def process_one(run_id: str, claim_id: str) -> None:
             run_id,
             harness_cmd=f"seeded::{domain}",
             dataset_id=f"seeded::{domain}",
-            params={"domain": domain, "task": task, "budget_usd": budget},
+            params={
+                "domain": domain,
+                "task": task,
+                "budget_usd": budget,
+                "comparators": comparators if requires_comparison else [],
+            },
             seeds={"mode": "seeded"},
             tokens_prompt=int(seed["ops"].get("tokens_prompt") or 0),
             tokens_output=int(seed["ops"].get("tokens_output") or 0),
             cost_usd=float(seed["ops"].get("cost_usd") or 0.0),
         )
+        _increment_validation_count(conn, claim_id)
         conn.commit()
 
 

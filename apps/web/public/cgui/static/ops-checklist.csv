@@ -1,0 +1,4 @@
+step,task,status
+1,Verify attitude control,complete
+2,Prime docking clamps,pending
+3,Archive payload caches,pending
