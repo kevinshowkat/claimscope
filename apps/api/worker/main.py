@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 
 from .agents_cagent import run_cagent_suite
 from .coding_humaneval import run_humaneval_subset
+from .coding_swebench import DATASET_ID as SWEBENCH_DATASET_ID, run_swebench_verified
 from .gui_cgui import run_cgui_suite
 from .logging_utils import get_logger
 from .reasoning_gsm8k import bootstrap_ci, run_gsm8k_subset
@@ -21,6 +22,10 @@ logger = get_logger("worker")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HUMANEVAL_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "coding_humaneval.py"]
+SWEBENCH_PATHS = [
+    REPO_ROOT / "apps" / "api" / "worker" / "coding_swebench.py",
+    REPO_ROOT / "packages" / "harness" / "swebench" / "README.md",
+]
 GSM8K_PATHS = [REPO_ROOT / "apps" / "api" / "worker" / "reasoning_gsm8k.py"]
 VISION_PATHS = [
     REPO_ROOT / "apps" / "api" / "worker" / "vision_mmmu.py",
@@ -530,6 +535,149 @@ def process_one(run_id: str, claim_id: str) -> None:
                     status_label="Failed",
                 )
                 return
+
+        # SWE-bench Verified (coding)
+        if domain == "coding" and "swe-bench" in task.lower():
+            # SWE-bench Verified harness is primarily offline, so budget checks are
+            # skipped. Provide knobs for trial count via claim settings.
+            try:
+                limit = int(settings.get("swebench_case_limit") or settings.get("n") or 25)
+            except (TypeError, ValueError):
+                limit = 25
+            limit = max(limit, 0)
+            try:
+                seed = int(settings.get("seed") or 1234)
+            except (TypeError, ValueError):
+                seed = 1234
+            cli_entry = settings.get("swebench_cli") or os.getenv("SWEBENCH_CLI_ENTRYPOINT")
+            dataset_root = settings.get("swebench_dataset") or os.getenv("SWEBENCH_DATASET_ROOT")
+            predictions_path = settings.get("swebench_predictions") or os.getenv("SWEBENCH_PREDICTIONS")
+            if not predictions_path:
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="missing_predictions",
+                    message="SWE-bench claims require swebench_predictions setting",
+                    details={**_comparison_details(), "required_setting": "swebench_predictions"},
+                )
+                return
+            max_workers = settings.get("swebench_max_workers") or os.getenv("SWEBENCH_MAX_WORKERS")
+            timeout_override = settings.get("swebench_timeout_s") or os.getenv("SWEBENCH_TIMEOUT_S")
+            try:
+                max_workers_int = int(max_workers) if max_workers is not None else None
+            except (TypeError, ValueError):
+                max_workers_int = None
+            try:
+                timeout_int = int(timeout_override) if timeout_override is not None else None
+            except (TypeError, ValueError):
+                timeout_int = None
+            try:
+                res, latencies = run_swebench_verified(
+                    limit=limit,
+                    seed=seed,
+                    cli_entrypoint=cli_entry,
+                    dataset_root=dataset_root,
+                    predictions_path=predictions_path,
+                    run_identifier=run_id,
+                    max_workers=max_workers_int,
+                    timeout=timeout_int,
+                )
+            except Exception as exc:
+                logger.exception("SWE-bench runner error for %s", run_id)
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="swebench_error",
+                    message=str(exc),
+                    status_label="Failed",
+                )
+                return
+
+            n = int(res.get("n") or limit)
+            cases = res.get("cases") or []
+            passed = sum(1 for case in cases if case.get("status") == "resolved") if cases else int(round(res["score_value"] * n))
+            if n > 0:
+                vals = [1] * passed + [0] * max(n - passed, 0)
+                lo, hi = bootstrap_ci(vals, n=n, reps=1000, seed=seed)
+            else:
+                lo = hi = 0.0
+            status_label = "Replicated"
+            diff_entries: list[Dict[str, Any]] = []
+            diff_entries.append(
+                {
+                    "reason": "swebench_cases",
+                    "message": "SWE-bench Verified evaluation summary",
+                    "evaluated": n,
+                    "passed": passed,
+                    "failed": max(n - passed, 0),
+                    "report_path": res.get("report_path"),
+                }
+            )
+            if limit and n < limit:
+                status_label = "Underspecified"
+                diff_entries.append(
+                    {
+                        "reason": "case_shortfall",
+                        "message": "Runner evaluated fewer cases than requested limit.",
+                        "requested": limit,
+                        "evaluated": n,
+                    }
+                )
+            if requires_comparison:
+                status_label = "Underspecified"
+                diff_entries.append(
+                    {
+                        "reason": "missing_comparator",
+                        "message": "Comparative claim evaluated without competitor baselines.",
+                        **_comparison_details(),
+                    }
+                )
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE runs SET status=:status, score_value=:score_value, ci_lower=:ci_lower, ci_upper=:ci_upper,
+                      ops=CAST(:ops AS JSONB), diffs=CAST(:diffs AS JSONB), status_label=:status_label,
+                      trace_id=:trace_id, completed_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "status": "succeeded",
+                    "score_value": res["score_value"],
+                    "ci_lower": lo,
+                    "ci_upper": hi,
+                    "ops": json.dumps(res.get("ops") or {}),
+                    "diffs": json.dumps(diff_entries),
+                    "status_label": status_label,
+                    "trace_id": trace_id,
+                },
+            )
+            record_trace(
+                conn,
+                run_id,
+                harness_cmd="python -m worker.coding_swebench",
+                harness_paths=SWEBENCH_PATHS,
+                dataset_id=SWEBENCH_DATASET_ID,
+                params={
+                    "limit": limit,
+                    "seed": seed,
+                    "cli_entrypoint": cli_entry,
+                    "dataset_root": dataset_root,
+                    "comparators": comparators if requires_comparison else [],
+                },
+                seeds={"sample_seed": seed},
+                tokens_prompt=0,
+                tokens_output=0,
+                latencies=latencies,
+                cost_usd=float(res.get("ops", {}).get("cost_usd", 0.0)),
+            )
+            _increment_validation_count(conn, claim_id)
+            conn.commit()
+            return
 
         # Real HumanEval (coding)
         if domain == "coding" and task.lower().startswith("humaneval"):

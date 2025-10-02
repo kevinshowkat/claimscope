@@ -1,7 +1,7 @@
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -101,6 +101,41 @@ def _extract_comparators(text: str) -> List[str]:
     return candidates[:5]
 
 
+def _extract_percentage_near(text: str, keywords: List[str]) -> Optional[float]:
+    if not keywords:
+        return None
+    lowered = text.lower()
+    keyword_ranges: List[Tuple[int, int]] = []
+    for keyword in keywords:
+        pattern = re.escape(keyword.lower())
+        for kw_match in re.finditer(pattern, lowered):
+            keyword_ranges.append((kw_match.start(), kw_match.end()))
+    if not keyword_ranges:
+        return None
+
+    best: Optional[Tuple[int, float]] = None
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*%", text):
+        mid = (match.start() + match.end()) // 2
+        for start, end in keyword_ranges:
+            if start <= mid <= end:
+                distance = 0
+            elif mid < start:
+                distance = start - mid
+            else:
+                distance = mid - end
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, value)
+            elif best and distance == best[0] and value:  # prefer later keyword match if tie
+                best = (distance, value)
+    if best is None:
+        return None
+    return best[1]
+
+
 def _detect_primary_model(text: str) -> Optional[str]:
     patterns = [
         r"claude opus\s*[0-9.]*",
@@ -188,7 +223,8 @@ def submit_claim(body: SubmitClaimRequest):
     )
 
     if "humaneval" in raw or "coding" in raw or "best coding" in raw:
-        add("coding", "HumanEval", "pass@1", 0.78, 0.85, settings=settings, model_hint=primary_model)
+        if "swe-bench" not in raw and "swebench" not in raw and "aider" not in raw:
+            add("coding", "HumanEval", "pass@1", 0.78, 0.85, settings=settings, model_hint=primary_model)
     if "cagent" in raw or "agents" in raw or "complex agents" in raw:
         add("agents", "cAgent-12", "success@1", 0.67, 0.8, settings=settings, model_hint=primary_model)
     if "cgui" in raw or "computers" in raw or "browser" in raw or "computer-use" in raw:
@@ -197,6 +233,25 @@ def submit_claim(body: SubmitClaimRequest):
         add("vision", "MMMU-mini", "accuracy", None, 0.7, settings=settings, model_hint=primary_model)
     if "gsm8k" in raw or "reasoning" in raw or "math" in raw:
         add("reasoning-math", "GSM8K", "accuracy", 0.94, 0.9, settings=settings, model_hint=primary_model)
+
+    swebench_score = None
+    swebench_keywords = ["swe-bench", "swebench"]
+    if any(keyword in raw for keyword in swebench_keywords):
+        swebench_score = _extract_percentage_near(body.raw_text or "", swebench_keywords)
+        ref = swebench_score / 100.0 if swebench_score is not None else 0.0
+        add("coding", "SWE-bench Verified", "pass@1", ref, 0.9, settings=settings, model_hint=primary_model)
+
+    aider_keywords = ["aider", "polyglot"]
+    if "aider" in raw or "polyglot" in raw:
+        aider_score = _extract_percentage_near(body.raw_text or "", aider_keywords)
+        ref = aider_score / 100.0 if aider_score is not None else 0.0
+        add("coding", "Aider Polyglot", "pass@1", ref, 0.85, settings=settings, model_hint=primary_model)
+
+    frontend_keywords = ["front-end", "frontend", "front end"]
+    if any(keyword in raw for keyword in frontend_keywords):
+        frontend_score = _extract_percentage_near(body.raw_text or "", frontend_keywords)
+        ref = frontend_score / 100.0 if frontend_score is not None else None
+        add("coding", "Front-end developer study", "win_rate", ref, 0.7, settings=settings, model_hint=primary_model)
 
     if not candidates:
         # default to a single reasoning-math claim

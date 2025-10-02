@@ -13,3 +13,4 @@ requests==2.32.3
 python-dateutil==2.9.0.post0
 PyYAML==6.0.2
 pytest==8.3.2
+swebench==3.0.17

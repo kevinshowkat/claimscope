@@ -1488,7 +1488,7 @@ export default function Page() {
           align-items: center;
           justify-content: center;
           padding: 48px 16px;
-          background: radial-gradient(circle at top, #172132, #0B0F14 65%);
+          background: #0B0F14;
           color: #E6EDF3;
         }
 
@@ -1790,6 +1790,33 @@ export default function Page() {
           align-self: stretch;
           letter-spacing: 0.01em;
           text-align: center;
+          position: relative;
+          overflow: hidden;
+          z-index: 0;
+        }
+
+        .share-chip::after {
+          content: "";
+          position: absolute;
+          inset: -70%;
+          background: conic-gradient(
+            from 90deg,
+            rgba(99, 102, 241, 0.35),
+            rgba(20, 184, 166, 0.18),
+            rgba(129, 140, 248, 0.45),
+            rgba(20, 184, 166, 0.18),
+            rgba(99, 102, 241, 0.35)
+          );
+          filter: blur(38px);
+          opacity: 0;
+          pointer-events: none;
+          animation: share-orbit 6s linear infinite;
+          transition: opacity 0.28s ease;
+          mix-blend-mode: screen;
+        }
+
+        .claim-card.is-running .share-chip::after {
+          opacity: 0.75;
         }
 
         .share-headline {

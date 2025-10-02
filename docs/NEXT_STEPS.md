@@ -20,8 +20,17 @@ This doc tracks the outstanding tasks after staging the cAgent-12 harness.
 - [x] Enforce/record budget estimates for offline suites.
 
 ## 4. Docs & Verification
-- [ ] Expand README with “How to run GUI locally” instructions and artifact expectations.
+- [ ] Expand README with "How to run GUI locally" instructions and artifact expectations.
 - [ ] Add changelog entries/screenshots once UI updates land.
 - [ ] Verify end-to-end flows via `docker compose up --build` and the curl smoke commands in the spec.
+
+## 5. Benchmark Validation (Marketing Claims)
+- [x] Implement SWE-bench Verified harness (`packages/harness/swebench`, `apps/api/worker/coding_swebench.py`).
+- [ ] Provide vetted prediction bundles + Docker guidance so the harness can run beyond fixtures.
+- [ ] Add GPQA runner and dataset packaging (`packages/harness/gpqa`, worker integration).
+- [ ] Vendor Aider Polyglot harness and efficiency telemetry hooks.
+- [ ] Extend HumanEval runner for full-suite mode and expose settings toggle.
+- [ ] Stand up MathVista harness with cached assets.
+- [ ] Build LongFact/FactScore factuality evaluator with reproducible judging pipeline.
 
 Keep this list updated as tasks complete.
