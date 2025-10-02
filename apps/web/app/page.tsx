@@ -795,6 +795,18 @@ export default function Page() {
   const [runStatus, setRunStatus] = useState<Record<string, RunStatus | undefined>>({});
   const [workingLabelIndex, setWorkingLabelIndex] = useState<Record<string, number>>({});
   const [localValidationCounts, setLocalValidationCounts] = useState<Record<string, number>>({});
+
+  const resolveValidationCount = useCallback(
+    (status: RunStatus | undefined, claim: Claim): number => {
+      const values: number[] = [];
+      if (typeof status?.validation_count === "number") values.push(status.validation_count);
+      const localCount = localValidationCounts[claim.id];
+      if (typeof localCount === "number") values.push(localCount);
+      if (typeof claim.validation_count === "number") values.push(claim.validation_count);
+      return values.length > 0 ? Math.max(...values) : 0;
+    },
+    [localValidationCounts],
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [openClaimId, setOpenClaimId] = useState<string | null>(null);
   const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT);
@@ -1385,10 +1397,7 @@ export default function Page() {
               })
               .filter((entry): entry is { reason?: string; message: string } => Boolean(entry?.message));
             const shareFooterItems = [claim.domain, claim.task].filter(Boolean);
-            const validationCount = Math.max(
-              0,
-              status?.validation_count ?? localValidationCounts[claim.id] ?? claim.validation_count ?? 0,
-            );
+            const validationCount = resolveValidationCount(status, claim);
             const formattedValidationCount = validationCount.toLocaleString();
             const validationBadgeText = validationCount === 1 ? "Validated 1×" : `Validated ${formattedValidationCount}×`;
             const badgeStyle = {
