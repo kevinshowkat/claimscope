@@ -1167,11 +1167,51 @@ export default function Page() {
             const quotedSnippet = `“${cleanedSnippet}”`;
             const cardState = statusKey === "queued" ? "is-queued" : statusKey === "running" ? "is-running" : "is-rest";
             const summary = buildSummary(claim, status);
-            const diffEntries = status?.diffs?.filter((diff) => {
-              if (!diff || typeof diff !== "object") return Boolean(diff);
-              const reason = typeof diff.reason === "string" ? diff.reason.toLowerCase() : "";
-              return reason !== "metrics" && reason !== "ops" && reason !== "artifacts";
-            });
+            const diffEntries = (status?.diffs ?? [])
+              .map((diff) => {
+                if (!diff) return null;
+                if (typeof diff !== "object") {
+                  const text = String(diff).trim();
+                  return text ? { reason: undefined, message: text } : null;
+                }
+
+                const rawReason = typeof diff.reason === "string" ? diff.reason : undefined;
+                const reasonKey = rawReason?.toLowerCase();
+                if (reasonKey === "metrics" || reasonKey === "ops" || reasonKey === "artifacts") {
+                  return null;
+                }
+
+                const messageCandidates = [diff.message, diff.details].map((value) =>
+                  typeof value === "string" ? value.trim() : ""
+                );
+                const message = messageCandidates.find((value) => value);
+                if (message) {
+                  return { reason: rawReason, message };
+                }
+
+                const extraEntries = Object.entries(diff).filter(([key, value]) => {
+                  if (key === "reason" || key === "message" || key === "details") return false;
+                  if (key === "metrics") return false;
+                  return value !== undefined && value !== null;
+                });
+
+                if (extraEntries.length === 0) return null;
+
+                const formatted = extraEntries
+                  .map(([key, value]) => {
+                    const label = key.replace(/_/g, " ");
+                    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+                      return `${label}: ${value}`;
+                    }
+                    return null;
+                  })
+                  .filter(Boolean)
+                  .join(" · ");
+
+                return formatted ? { reason: rawReason, message: formatted } : null;
+              })
+              .filter((entry): entry is { reason?: string; message: string } => Boolean(entry?.message));
+            const shareFooterItems = [claim.domain, claim.task].filter(Boolean);
 
                 return (
                   <div
@@ -1181,8 +1221,9 @@ export default function Page() {
                   >
                     <div className="share-top">
                       <span className="share-tag" style={{ color: shareTheme.caption }}>
-                        Claim {index + 1} • {claim.domain} • {claim.task}
+                        Claim {index + 1}
                       </span>
+                      <span className="share-claim-title">{quotedSnippet}</span>
                     </div>
 
                     <div className="share-claim-text">
@@ -1196,7 +1237,6 @@ export default function Page() {
                       >
                         {chipLabel}
                       </span>
-                      <span className="share-claim-snippet">{quotedSnippet}</span>
                     </div>
 
                     <div className="share-headline" style={{ borderColor: hexToRgba(shareTheme.accentPrimary, 0.55) }}>
@@ -1211,15 +1251,25 @@ export default function Page() {
                       </ul>
                     )}
 
-                    {status && diffEntries && diffEntries.length > 0 && (
+                    {status && diffEntries.length > 0 && (
                       <ul className="diff-list">
                         {diffEntries.map((diff, index) => (
                           <li key={index}>
                             <span className="diff-key">{diff.reason ?? "details"}</span>
-                            <span className="diff-value">{diff.message ?? JSON.stringify(diff)}</span>
+                            <span className="diff-value">{diff.message}</span>
                           </li>
                         ))}
                       </ul>
+                    )}
+
+                    {shareFooterItems.length > 0 && (
+                      <div className="share-footer">
+                        {shareFooterItems.map((item, index) => (
+                          <span key={`${item}-${index}`} className="share-footer-item">
+                            {item}
+                          </span>
+                        ))}
+                      </div>
                     )}
 
                   </div>
@@ -1483,9 +1533,9 @@ export default function Page() {
 
         .share-top {
           display: flex;
-          justify-content: space-between;
+          flex-direction: column;
           align-items: flex-start;
-          gap: 16px;
+          gap: 6px;
         }
 
         .share-tag {
@@ -1493,6 +1543,13 @@ export default function Page() {
           text-transform: uppercase;
           letter-spacing: 0.08em;
           font-weight: 600;
+        }
+
+        .share-claim-title {
+          font-size: 1.05rem;
+          font-weight: 500;
+          color: rgba(248, 250, 252, 0.9);
+          font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
         }
 
         .share-claim-text {
@@ -1512,16 +1569,8 @@ export default function Page() {
           font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
           color: #FFFFFF;
           align-self: stretch;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
+          letter-spacing: 0.01em;
           text-align: center;
-        }
-
-        .share-claim-snippet {
-          font-size: 1.2rem;
-          color: #FFFFFF;
-          line-height: 1.4;
-          font-weight: 600;
         }
 
         .share-headline {
@@ -1551,6 +1600,21 @@ export default function Page() {
           flex-direction: column;
           gap: 6px;
           font-size: 0.9rem;
+        }
+
+        .share-footer {
+          margin-top: 18px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          font-size: 0.85rem;
+          color: rgba(248, 250, 252, 0.75);
+        }
+
+        .share-footer-item {
+          background: rgba(15, 23, 42, 0.55);
+          border-radius: 999px;
+          padding: 6px 12px;
         }
 
         .share-summary-list {
