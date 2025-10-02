@@ -15,14 +15,8 @@ const inter = Inter({
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body className={inter.className} style={{ background: "#0B0F14", color: "#E6EDF3" }}>
-        <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px" }}>
-          <header style={{ marginBottom: 24 }}>
-            <h1 style={{ margin: 0 }}>Claimscope — Labs Edition</h1>
-            <p style={{ opacity: 0.8 }}>Paste a claim, run a reproduction, share a receipt.</p>
-          </header>
-          {children}
-        </div>
+      <body className={inter.className} style={{ background: "#0B0F14", color: "#E6EDF3", margin: 0 }}>
+        {children}
       </body>
     </html>
   );

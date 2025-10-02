@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
-import { Receipt, RunStatus } from "../components/Receipt";
+import { RunStatus } from "../components/Receipt";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -43,6 +43,8 @@ type Segment = {
   end: number | null;
   status: RunStatus["status"] | "idle";
   verdict: Verdict;
+  isClaim: boolean;
+  claimId: string | null;
 };
 
 const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
@@ -71,7 +73,7 @@ const STATUS_META: Record<RunStatus["status"] | "idle", StatusVisual> = {
     text: "#E6EDF3",
   },
   succeeded: {
-    label: "True / replicated",
+    label: "Replicated",
     background: "#10291A",
     border: "#1F4D30",
     chipBg: "#2EA043",
@@ -114,12 +116,93 @@ const VERDICT_META: Record<Verdict, StatusVisual> = {
     text: "#D1D5DB",
   },
   true_replicated: {
-    label: "True / replicated",
+    label: "Replicated",
     background: "#10291A",
     border: "#1F4D30",
     chipBg: "#2EA043",
     chipText: "#E9F6ED",
     text: "#E6EDF3",
+  },
+};
+
+type ShareTheme = {
+  background: string;
+  text: string;
+  accentPrimary: string;
+  accentSecondary: string;
+  caption: string;
+};
+
+const SHARE_THEME: Record<Verdict | "queued" | "running" | "idle", ShareTheme> = {
+  idle: {
+    background: "#111827",
+    text: "#E5E7EB",
+    accentPrimary: "#4B5563",
+    accentSecondary: "#6B7280",
+    caption: "#9CA3AF",
+  },
+  queued: {
+    background: "#13203B",
+    text: "#E0E7FF",
+    accentPrimary: "#8FA7FF",
+    accentSecondary: "#617BFF",
+    caption: "#B4C4FF",
+  },
+  running: {
+    background: "#102347",
+    text: "#E0E7FF",
+    accentPrimary: "#7DD3FC",
+    accentSecondary: "#38BDF8",
+    caption: "#93C5FD",
+  },
+  true_replicated: {
+    background: "#0B3DFF",
+    text: "#F5F8FF",
+    accentPrimary: "#2EA043",
+    accentSecondary: "#1F4D30",
+    caption: "#D0DCFF",
+  },
+  likely_true: {
+    background: "#1E293B",
+    text: "#E2E8F0",
+    accentPrimary: "#FACC15",
+    accentSecondary: "#F59E0B",
+    caption: "#FFE08A",
+  },
+  likely_exaggerated: {
+    background: "#3C1424",
+    text: "#FFE4E6",
+    accentPrimary: "#FB7185",
+    accentSecondary: "#F43F5E",
+    caption: "#FCA5A5",
+  },
+  no_evidence: {
+    background: "#1B2532",
+    text: "#E5E7EB",
+    accentPrimary: "#9CA3AF",
+    accentSecondary: "#6B7280",
+    caption: "#CBD5F5",
+  },
+};
+
+const MIN_INPUT_HEIGHT = 64;
+
+const DOMAIN_SUMMARY: Record<string, { success: string; caveat: string }> = {
+  coding: {
+    success: "Cleared all HumanEval programming prompts in our sample without assertion failures.",
+    caveat: "Only 25 deterministic Python functions are covered here; broader coding ability is not guaranteed.",
+  },
+  "reasoning-math": {
+    success: "Answered the GSM8K word problems we sampled correctly.",
+    caveat: "This subset is small—it’s evidence of competence, not absolute proof of mathematical supremacy.",
+  },
+  agents: {
+    success: "Executed every cAgent-12 workflow to completion.",
+    caveat: "These flows mirror our internal tasks; real-world agent complexity can vary widely.",
+  },
+  "computer-use": {
+    success: "Completed all scripted browser tasks in the cGUI-10 benchmark without timeouts.",
+    caveat: "This harness is a deterministic simulation and does not prove superiority on every computer-use task.",
   },
 };
 
@@ -168,9 +251,277 @@ function findSegmentRange(raw: string, fragment: string, fromIndex: number): { s
   return null;
 }
 
-function extractSegments(raw: string, claims: Claim[]): Segment[] {
-  const compact = raw.replace(/\s+/g, " ").trim();
+type ClaimSignals = {
+  hasQuantitative: boolean;
+  hasNumber: boolean;
+  hasSuperlative: boolean;
+  hasLeadership: boolean;
+  hasImprovementAdjective: boolean;
+  hasProgressNoun: boolean;
+  hasImpactVerb: boolean;
+  hasDomainTerm: boolean;
+  hasBenchmarkDescription: boolean;
+  hasNowLeadership: boolean;
+};
 
+const QUANT_PATTERN = /\b\d+(?:\.\d+)?\s?(?:%|percent|percentage|pts?|points|pp|x|times|wins?|score(?:s)?|pp)\b/i;
+const NUMBER_PATTERN = /\b\d+(?:\.\d+)?\b/;
+const SUPERLATIVE_PATTERN = /\b(best|strongest|leading|leader|top|dominant|premier|ultimate|unmatched|unrivaled|superior|elite|flagship|number\s?one|#1|most\s+(?:advanced|capable|powerful|accurate|efficient|effective|comprehensive|trusted|scalable|secure|innovative|versatile|intelligent|reliable))\b/i;
+const LEADERSHIP_PATTERN = /\b(leads?|tops?|dominates?|wins?|outperforms?|surpasses?|beats?|outpaces?|outclasses?|commands?|captures?|ranks?\s*(?:first|#?1|top|highest))\b/i;
+const IMPROVEMENT_ADJECTIVE_PATTERN = /\b(significant|major|substantial|dramatic|remarkable|notable|meaningful|transformative|breakthrough|outsized|huge|massive|substantive|strong|large|noteworthy)\b/i;
+const PROGRESS_NOUN_PATTERN = /\b(leap|advance|improvement|progress|gain|boost|growth|increase|surge|uptick|lift|advancement|stride|gains)\b/i;
+const IMPACT_VERB_PATTERN = /\b(represents|is|are|remains|continues|shows?|demonstrates?|delivers?|drives?|achieves?|posts?|records?|scores?|tests?|evaluates?|measures?|assesses?|validates?|confirms?|proves?|enables?|powers?|supports?)\b/i;
+const DOMAIN_PATTERN = /\b(model|models|system|systems|platform|solution|suite|benchmark|benchmarks|score|scores|performance|accuracy|agent|agents|agentic|reasoning|math|maths|compute|computer|coding|code|capability|capabilities|dataset|evaluation|task|tasks|benchmarking)\b/i;
+const BENCHMARK_DESCRIPTION_PATTERN = /\bbenchmark\b/i;
+const TEST_VERB_PATTERN = /\b(tests?|evaluates?|measures?|assesses?)\b/i;
+
+function claimSignals(text: string): ClaimSignals {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+
+  const hasQuantitative = QUANT_PATTERN.test(normalized);
+  const hasNumber = hasQuantitative || NUMBER_PATTERN.test(normalized);
+  const hasSuperlative = SUPERLATIVE_PATTERN.test(normalized);
+  const hasLeadership = LEADERSHIP_PATTERN.test(normalized);
+  const hasImprovementAdjective = IMPROVEMENT_ADJECTIVE_PATTERN.test(normalized);
+  const hasProgressNoun = PROGRESS_NOUN_PATTERN.test(normalized);
+  const hasImpactVerb = IMPACT_VERB_PATTERN.test(normalized);
+  const hasDomainTerm = DOMAIN_PATTERN.test(normalized);
+  const hasBenchmarkDescription = BENCHMARK_DESCRIPTION_PATTERN.test(normalized) && TEST_VERB_PATTERN.test(normalized);
+  const hasNowLeadership = lower.includes(" now ") && hasLeadership;
+
+  return {
+    hasQuantitative,
+    hasNumber,
+    hasSuperlative,
+    hasLeadership,
+    hasImprovementAdjective,
+    hasProgressNoun,
+    hasImpactVerb,
+    hasDomainTerm,
+    hasBenchmarkDescription,
+    hasNowLeadership,
+  };
+}
+
+function isClaimSentence(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length < 12) return false;
+
+  const signals = claimSignals(normalized);
+  if (signals.hasBenchmarkDescription) return true;
+  if (signals.hasQuantitative && (signals.hasLeadership || signals.hasImpactVerb || signals.hasDomainTerm)) return true;
+  if (signals.hasLeadership && (signals.hasQuantitative || signals.hasSuperlative || signals.hasDomainTerm || signals.hasNumber)) return true;
+  if (signals.hasSuperlative && (signals.hasImpactVerb || signals.hasDomainTerm || signals.hasLeadership)) return true;
+  if (signals.hasImprovementAdjective && signals.hasImpactVerb && (signals.hasProgressNoun || signals.hasDomainTerm)) return true;
+  if (signals.hasProgressNoun && signals.hasImpactVerb && signals.hasDomainTerm) return true;
+  if (signals.hasNumber && signals.hasImpactVerb && signals.hasDomainTerm) return true;
+  if (signals.hasNowLeadership) return true;
+
+  return false;
+}
+
+type ClaimCandidate = {
+  text: string;
+  start: number;
+  end: number;
+  index: number;
+};
+
+function splitIntoSentences(raw: string): Array<{ text: string; start: number; end: number }> {
+  const sentences: Array<{ text: string; start: number; end: number }> = [];
+  let pointer = 0;
+  const length = raw.length;
+
+  const push = (from: number, to: number) => {
+    if (to <= from) return;
+    const fragment = raw.slice(from, to);
+    const trimmed = fragment.trim();
+    if (!trimmed) return;
+    const offset = fragment.indexOf(trimmed);
+    const absoluteStart = from + (offset >= 0 ? offset : 0);
+    const absoluteEnd = absoluteStart + trimmed.length;
+    sentences.push({ text: trimmed, start: absoluteStart, end: absoluteEnd });
+  };
+
+  for (let index = 0; index < length; index += 1) {
+    const char = raw[index];
+
+    if (char === "\n") {
+      push(pointer, index);
+      pointer = index + 1;
+      continue;
+    }
+
+    if (char === "." || char === "!" || char === "?") {
+      const prev = index > 0 ? raw[index - 1] : "";
+      const next = index + 1 < length ? raw[index + 1] : "";
+
+      if (char === "." && /\d/.test(prev) && /\d/.test(next)) {
+        continue;
+      }
+
+      let boundary = index + 1;
+      while (boundary < length && /["'’\)\]\s]/.test(raw[boundary])) {
+        boundary += 1;
+      }
+
+      push(pointer, boundary);
+      pointer = boundary;
+    }
+  }
+
+  if (pointer < length) {
+    push(pointer, length);
+  }
+
+  return sentences;
+}
+
+function detectClaimCandidates(raw: string): ClaimCandidate[] {
+  if (!raw.trim()) return [];
+
+  const results: ClaimCandidate[] = [];
+  const seen = new Set<string>();
+  const sentences = splitIntoSentences(raw);
+
+  sentences.forEach((sentence, index) => {
+    if (!isClaimSentence(sentence.text)) return;
+    const key = `${sentence.start}:${sentence.end}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({ ...sentence, index });
+  });
+
+  return results.sort((a, b) => a.start - b.start);
+}
+
+function tokenize(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
+}
+
+function scoreCandidateForClaim(claim: Claim, candidate: ClaimCandidate, claimPosition: number): number {
+  let score = 0;
+  const text = candidate.text.toLowerCase();
+  const domain = (claim.domain || "").toLowerCase();
+  const task = (claim.task || "").toLowerCase();
+  const metric = (claim.metric || "").toLowerCase();
+
+  if (domain && text.includes(domain)) score += 12;
+  if (task && text.includes(task)) score += 14;
+  if (metric && text.includes(metric)) score += 6;
+
+  tokenize(domain).forEach((token) => {
+    if (text.includes(token)) score += 4;
+  });
+  tokenize(task).forEach((token) => {
+    if (text.includes(token)) score += 5;
+  });
+  tokenize(metric).forEach((token) => {
+    if (text.includes(token)) score += 2;
+  });
+
+  if (task.includes("agent") && text.includes("agent")) score += 8;
+  if (task.includes("computer") && text.includes("computer")) score += 8;
+  if (task.includes("coding") && (text.includes("coding") || text.includes("code"))) score += 6;
+
+  const signals = claimSignals(candidate.text);
+  if (signals.hasSuperlative) score += 3;
+  if (signals.hasLeadership) score += 4;
+  if (signals.hasQuantitative) score += 3;
+  if (signals.hasBenchmarkDescription) score += 5;
+
+  score -= Math.abs(candidate.index - claimPosition) * 0.6;
+
+  return score;
+}
+
+function matchCandidatesToClaims(claims: Claim[], candidates: ClaimCandidate[]): {
+  assignments: Array<ClaimCandidate | null>;
+  remaining: ClaimCandidate[];
+} {
+  const available = [...candidates];
+  const assignments: Array<ClaimCandidate | null> = [];
+
+  claims.forEach((claim, claimIndex) => {
+    let bestScore = -Infinity;
+    let bestIndex = -1;
+
+    available.forEach((candidate, candidateIndex) => {
+      const score = scoreCandidateForClaim(claim, candidate, claimIndex);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = candidateIndex;
+      }
+    });
+
+    if (bestIndex >= 0) {
+      const [picked] = available.splice(bestIndex, 1);
+      assignments.push(picked ?? null);
+    } else {
+      assignments.push(null);
+    }
+  });
+
+  return { assignments, remaining: available };
+}
+
+type DetectionResult = {
+  segments: Segment[];
+  candidates: ClaimCandidate[];
+};
+
+function buildDetectionSegments(raw: string): DetectionResult {
+  const detected = detectClaimCandidates(raw);
+
+  if (detected.length === 0) {
+    const trimmed = raw.trim();
+    if (!trimmed) return { segments: [], candidates: [] };
+    const start = raw.indexOf(trimmed);
+    const candidate: ClaimCandidate = {
+      text: trimmed,
+      start: start >= 0 ? start : 0,
+      end: (start >= 0 ? start : 0) + trimmed.length,
+      index: 0,
+    };
+
+    return {
+      segments: [
+        {
+          id: "detected-0",
+          text: trimmed,
+          start: candidate.start,
+          end: candidate.end,
+          status: "idle",
+          verdict: "no_evidence",
+          isClaim: true,
+          claimId: null,
+        },
+      ],
+      candidates: [candidate],
+    };
+  }
+
+  return {
+    segments: detected.map((candidate) => ({
+      id: `detected-${candidate.index}`,
+      text: candidate.text,
+      start: candidate.start,
+      end: candidate.end,
+      status: "idle",
+      verdict: "no_evidence",
+      isClaim: true,
+      claimId: null,
+    })),
+    candidates: detected,
+  };
+}
+
+function buildFallbackSegments(raw: string, claims: Claim[], cursorRef: { value: number }): Segment[] {
+  const compact = raw.replace(/\s+/g, " ").trim();
   const lineCandidates = raw
     .split(/\n+/)
     .map((line) => line.trim())
@@ -186,36 +537,137 @@ function extractSegments(raw: string, claims: Claim[]): Segment[] {
       ? sentenceCandidates
       : lineCandidates.length > 0
         ? lineCandidates
-        : compact
-          ? [compact]
-          : [];
-
-  let cursor = 0;
+        : [compact];
 
   return claims.map((claim, index) => {
-    const candidate = candidates[index] ?? candidates[candidates.length - 1] ?? `${claim.domain} / ${claim.task}`;
-    const match = findSegmentRange(raw, candidate, cursor);
+    const candidate = candidates[index] ?? candidates[candidates.length - 1] ?? compact;
+    const match = findSegmentRange(raw, candidate, cursorRef.value);
 
     if (match) {
-      cursor = match.end;
+      cursorRef.value = match.end;
       return {
-        id: claim.id,
-        text: candidate,
+        id: `fallback-${claim.id}`,
+        text: raw.slice(match.start, match.end).trim() || candidate,
         start: match.start,
         end: match.end,
         status: "idle",
         verdict: "no_evidence",
+        isClaim: true,
+        claimId: claim.id,
       };
     }
 
     return {
-      id: claim.id,
+      id: `fallback-${claim.id}`,
       text: candidate,
       start: null,
       end: null,
       status: "idle",
       verdict: "no_evidence",
+      isClaim: true,
+      claimId: claim.id,
     };
+  });
+}
+
+function seedSegmentsFromRaw(raw: string): Segment[] {
+  return buildDetectionSegments(raw).segments;
+}
+
+function buildSummary(claim: Claim, status: RunStatus | undefined) {
+  const current = status ?? { run_id: "", status: "idle" };
+  const bullets: string[] = [];
+  let headline = "Awaiting validation.";
+
+  if (current.status === "succeeded") {
+    headline = `All ${claim.task} checks passed.`;
+    const domainCopy = DOMAIN_SUMMARY[claim.domain];
+    if (domainCopy) {
+      bullets.push(domainCopy.success);
+      bullets.push(domainCopy.caveat);
+    }
+    if (current.ops?.p95_latency_s) {
+      bullets.push(
+        `Runs completed with roughly ${current.ops.p95_latency_s.toFixed(2)}s p95 latency and no service issues.`,
+      );
+    }
+  } else if (current.status === "failed") {
+    headline = `Validation failed for ${claim.task}.`;
+    if (current.diffs && current.diffs.length > 0) {
+      for (const diff of current.diffs) {
+        const reason = typeof diff.reason === "string" ? diff.reason.replace(/_/g, " ") : "issue";
+        bullets.push(`${reason}: ${diff.message ?? JSON.stringify(diff)}`);
+      }
+    }
+  } else if (current.status === "running") {
+    headline = `Running ${claim.task} harness…`;
+    bullets.push("The evaluation is still gathering evidence; results will update automatically.");
+  } else if (current.status === "queued") {
+    headline = "Queued for execution.";
+    bullets.push(`Waiting for an available worker to start the ${claim.task} suite.`);
+  }
+
+  return { headline, bullets };
+}
+
+function extractSegments(raw: string, claims: Claim[]): Segment[] {
+  const detection = buildDetectionSegments(raw);
+  const matching = matchCandidatesToClaims(claims, detection.candidates);
+
+  const detectionMap = new Map<number, Segment>();
+  detection.segments.forEach((segment) => {
+    const match = /^detected-(\d+)$/.exec(segment.id);
+    if (!match) return;
+    const index = Number.parseInt(match[1], 10);
+    if (!Number.isNaN(index)) {
+      detectionMap.set(index, segment);
+      segment.claimId = null;
+    }
+  });
+
+  const unmatched: Claim[] = [];
+  matching.assignments.forEach((candidate, claimIndex) => {
+    const claim = claims[claimIndex];
+    if (!claim) return;
+
+    if (candidate) {
+      const segment = detectionMap.get(candidate.index);
+      if (segment) {
+        segment.claimId = claim.id;
+      }
+    } else {
+      unmatched.push(claim);
+    }
+  });
+
+  const cursorRef = { value: 0 };
+  const fallbackSegments = unmatched.length > 0 ? buildFallbackSegments(raw, unmatched, cursorRef) : [];
+
+  const merged = [...detection.segments];
+
+  fallbackSegments.forEach((fallback) => {
+    const normalizedFallback = fallback.text.trim().toLowerCase();
+    const detectionMatch = merged.find((segment) => {
+      if (segment.claimId) return false;
+      return segment.text.trim().toLowerCase() === normalizedFallback;
+    });
+
+    if (detectionMatch) {
+      detectionMatch.claimId = fallback.claimId;
+      if (fallback.start !== null && fallback.end !== null) {
+        detectionMatch.start = fallback.start;
+        detectionMatch.end = fallback.end;
+      }
+    } else {
+      merged.push(fallback);
+    }
+  });
+
+  return merged.sort((a, b) => {
+    const aStart = typeof a.start === "number" ? a.start : Number.MAX_SAFE_INTEGER;
+    const bStart = typeof b.start === "number" ? b.start : Number.MAX_SAFE_INTEGER;
+    if (aStart !== bStart) return aStart - bStart;
+    return a.id.localeCompare(b.id);
   });
 }
 
@@ -263,19 +715,19 @@ function verdictSummary(verdict: Verdict, statusKey: RunStatus["status"] | "idle
     return { text: "Queued for execution", tone: "muted" as const };
   }
   if (statusKey === "idle") {
-    return { text: "No evidence yet — run validation.", tone: "muted" as const };
+    return { text: "Awaiting validation", tone: "muted" as const };
   }
 
   switch (verdict) {
     case "true_replicated":
-      return { text: "Claim replicated successfully", tone: "positive" as const };
+      return { text: "Replicated result", tone: "positive" as const };
     case "likely_true":
-      return { text: "Evidence leans toward accuracy", tone: "warning" as const };
+      return { text: "Likely true", tone: "warning" as const };
     case "likely_exaggerated":
-      return { text: "Evidence points to exaggeration", tone: "negative" as const };
+      return { text: "Signs of exaggeration", tone: "negative" as const };
     case "no_evidence":
     default:
-      return { text: "No supporting evidence found", tone: "muted" as const };
+      return { text: "No evidence found", tone: "muted" as const };
   }
 }
 
@@ -286,14 +738,74 @@ export default function Page() {
   const [runStatus, setRunStatus] = useState<Record<string, RunStatus | undefined>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [openClaimId, setOpenClaimId] = useState<string | null>(null);
+  const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT);
+  const [hoverInfo, setHoverInfo] = useState<{ text: string; x: number; y: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const highlightContentRef = useRef<HTMLDivElement | null>(null);
   const [isFocused, setIsFocused] = useState(false);
+
+  const updateInputHeight = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const next = Math.max(textarea.scrollHeight, MIN_INPUT_HEIGHT);
+    textarea.style.height = `${next}px`;
+    setInputHeight(next);
+  }, []);
 
   const syncHighlightScroll = useCallback((element: HTMLTextAreaElement | null) => {
     if (!element || !highlightContentRef.current) return;
     const { scrollTop, scrollLeft } = element;
     highlightContentRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
+    setHoverInfo(null);
+  }, []);
+
+  useEffect(() => {
+    updateInputHeight();
+  }, [raw, updateInputHeight]);
+
+  useEffect(() => {
+    if (claims.length === 0) {
+      setSegments(seedSegmentsFromRaw(raw));
+    }
+  }, [claims.length, raw]);
+
+  const handleHighlightHover = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    const highlightContainer = highlightContentRef.current?.parentElement as HTMLElement | null;
+    const highlightContent = highlightContentRef.current;
+    let elementsAtPointer: Element[] = [];
+
+    if (typeof document !== "undefined") {
+      const prevContainerPointer = highlightContainer?.style.pointerEvents ?? "";
+      const prevContentPointer = highlightContent?.style.pointerEvents ?? "";
+      try {
+        if (highlightContainer) highlightContainer.style.pointerEvents = "auto";
+        if (highlightContent) highlightContent.style.pointerEvents = "auto";
+        elementsAtPointer = document.elementsFromPoint(event.clientX, event.clientY);
+      } finally {
+        if (highlightContainer) highlightContainer.style.pointerEvents = prevContainerPointer;
+        if (highlightContent) highlightContent.style.pointerEvents = prevContentPointer;
+      }
+    }
+
+    const match = elementsAtPointer.find(
+      (element): element is HTMLElement => element instanceof HTMLElement && Boolean(element.dataset.summary),
+    );
+
+    if (match) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const x = Math.min(Math.max(event.clientX - rect.left, 16), rect.width - 16);
+      const y = Math.min(Math.max(event.clientY - rect.top, 16), rect.height - 16);
+      const text = match.dataset.summary ?? "";
+      setHoverInfo({ text, x, y });
+      return;
+    }
+
+    setHoverInfo(null);
+  }, []);
+
+  const clearHighlightHover = useCallback(() => {
+    setHoverInfo(null);
   }, []);
 
   useEffect(() => {
@@ -304,9 +816,9 @@ export default function Page() {
 
       let hasChanges = false;
       const next = previous.map((segment) => {
-        const statusObj = runStatus[segment.id];
+        const statusObj = segment.claimId ? runStatus[segment.claimId] : undefined;
         const statusKey = (statusObj?.status ?? "idle") as Segment["status"];
-        const verdict = resolveVerdict(claimLookup.get(segment.id), statusObj);
+        const verdict = resolveVerdict(segment.claimId ? claimLookup.get(segment.claimId) : undefined, statusObj);
 
         if (segment.status === statusKey && segment.verdict === verdict) {
           return segment;
@@ -343,12 +855,20 @@ export default function Page() {
 
     const styleFor = (verdictKey: Verdict) => {
       const meta = VERDICT_META[verdictKey] ?? VERDICT_META.no_evidence;
-      const emphasis = verdictKey === "no_evidence" ? 0.16 : 0.28;
+      const emphasis = verdictKey === "no_evidence" ? 0.15 : 0.3;
+      const textColor = verdictKey === "no_evidence" ? "#E6EDF3" : meta.text;
+      const underlineColor = verdictKey === "no_evidence" ? "rgba(148, 163, 184, 0.85)" : meta.chipBg;
+      const surface = verdictKey === "no_evidence"
+        ? "rgba(148, 163, 184, 0.22)"
+        : hexToRgba(meta.chipBg, emphasis);
+      const outline = verdictKey === "no_evidence"
+        ? "rgba(148, 163, 184, 0.35)"
+        : hexToRgba(meta.chipBg, 0.4);
       return {
-        color: meta.chipText,
-        textDecorationColor: meta.chipBg,
-        backgroundColor: hexToRgba(meta.chipBg, emphasis),
-        boxShadow: `0 0 0 1px ${hexToRgba(meta.chipBg, 0.25)} inset`,
+        color: textColor,
+        textDecorationColor: underlineColor,
+        backgroundColor: surface,
+        boxShadow: `0 0 0 1px ${outline} inset`,
       };
     };
 
@@ -367,12 +887,18 @@ export default function Page() {
 
       return segments.flatMap((segment, index) => {
         const verdictKey = segment.verdict;
-        const content = (
+        const summary = verdictSummary(verdictKey, segment.status).text;
+        const content = segment.isClaim ? (
           <span
             key={`segment-${segment.id}-${index}`}
             className={`highlight-segment verdict-${verdictKey}`}
             style={styleFor(verdictKey)}
+            data-summary={summary}
           >
+            {segment.text}
+          </span>
+        ) : (
+          <span key={`segment-${segment.id}-${index}`} className="claim-plain">
             {segment.text}
           </span>
         );
@@ -406,15 +932,26 @@ export default function Page() {
 
       if (end > start) {
         const verdictKey = segment.verdict;
-        nodes.push(
-          <span
-            key={`segment-${segment.id}-${index}`}
-            className={`highlight-segment verdict-${verdictKey}`}
-            style={styleFor(verdictKey)}
-          >
-            {raw.slice(start, end)}
-          </span>,
-        );
+        const summary = verdictSummary(verdictKey, segment.status).text;
+        const slice = raw.slice(start, end);
+        if (segment.isClaim) {
+          nodes.push(
+            <span
+              key={`segment-${segment.id}-${index}`}
+              className={`highlight-segment verdict-${verdictKey}`}
+              style={styleFor(verdictKey)}
+              data-summary={summary}
+            >
+              {slice}
+            </span>,
+          );
+        } else {
+          nodes.push(
+            <span key={`segment-${segment.id}-${index}`} className="claim-plain">
+              {slice}
+            </span>,
+          );
+        }
       }
 
       cursor = Math.max(cursor, end);
@@ -445,7 +982,7 @@ export default function Page() {
     if (!raw.trim()) return;
     setIsSubmitting(true);
     setClaims([]);
-    setSegments([]);
+    setSegments(seedSegmentsFromRaw(raw));
     setRunStatus({});
     setOpenClaimId(null);
     try {
@@ -556,13 +1093,13 @@ export default function Page() {
   return (
     <main className="page">
       <div className="shell">
-        <h1>Claim Validator</h1>
-        <p className="subtitle">
-          Paste a claim below and click validate. We will parse it, run the appropriate test suite, and color-code the
-          results.
-        </p>
-        <div className={`claim-input-wrapper ${isFocused ? "is-focused" : ""}`}>
-          <div className="claim-input-highlights" aria-hidden="true">
+        <div
+          className={`claim-input-wrapper ${isFocused ? "is-focused" : ""}`}
+          style={{ minHeight: inputHeight }}
+          onMouseMove={handleHighlightHover}
+          onMouseLeave={clearHighlightHover}
+        >
+          <div className="claim-input-highlights" aria-hidden="true" style={{ minHeight: inputHeight }}>
             <div className="claim-input-highlights-content" ref={highlightContentRef}>
               {highlightNodes}
             </div>
@@ -570,18 +1107,30 @@ export default function Page() {
           <textarea
             ref={textareaRef}
             value={raw}
-            onChange={(event) => setRaw(event.target.value)}
+            onChange={(event) => {
+              setRaw(event.target.value);
+              updateInputHeight();
+            }}
             placeholder="Paste a claim statement here..."
             className="claim-input"
-            onFocus={() => setIsFocused(true)}
+            rows={1}
+            onFocus={() => {
+              setIsFocused(true);
+              updateInputHeight();
+            }}
             onBlur={() => setIsFocused(false)}
             onScroll={(event) => syncHighlightScroll(event.currentTarget)}
           />
-        </div>
-        <div className="actions">
-          <button onClick={submitClaim} disabled={isSubmitting || !raw.trim()} className="primary">
-            {isSubmitting ? "Validating..." : "Validate Claim"}
-          </button>
+          <div className="validate-action">
+            <button onClick={submitClaim} disabled={isSubmitting || !raw.trim()} className="primary">
+              {isSubmitting ? "Validating..." : "Validate"}
+            </button>
+          </div>
+          {hoverInfo && hoverInfo.text && (
+            <div className="claim-tooltip" style={{ top: hoverInfo.y, left: hoverInfo.x }}>
+              {hoverInfo.text}
+            </div>
+          )}
         </div>
 
         {statusMessage && (
@@ -590,70 +1139,81 @@ export default function Page() {
             <span>{statusMessage}...</span>
           </div>
         )}
+
         {claims.length > 0 && (
           <section className="results">
             <h2>Results</h2>
             <div className="claim-list">
-              {claims.map((claim) => {
+              {claims.map((claim, index) => {
                 const status = runStatus[claim.id];
                 const statusKey: RunStatus["status"] | "idle" = status?.status ?? "idle";
                 const verdict = resolveVerdict(claim, status);
-                const verdictMeta = VERDICT_META[verdict];
-                const isProgress = statusKey === "queued" || statusKey === "running";
-                const surfaceMeta = isProgress ? STATUS_META[statusKey] : verdictMeta;
-                const chipMeta = isProgress ? STATUS_META[statusKey] : verdictMeta;
-                const chipLabel = isProgress ? STATUS_META[statusKey].label : verdictMeta.label;
-                const summaryInfo = verdictSummary(verdict, statusKey);
-                const isOpen = openClaimId === claim.id;
-                const reference = typeof claim.reference_score === "number" ? claim.reference_score : "—";
+                const chipLabel = statusKey === "queued" || statusKey === "running"
+                  ? STATUS_META[statusKey].label
+                  : VERDICT_META[verdict].label;
+                const shareThemeKey: keyof typeof SHARE_THEME =
+                  statusKey === "queued"
+                    ? "queued"
+                    : statusKey === "running"
+                      ? "running"
+                      : statusKey === "idle"
+                        ? "idle"
+                        : verdict;
+                const shareTheme = SHARE_THEME[shareThemeKey] ?? SHARE_THEME.no_evidence;
+                const claimSnippet = segments.find((segment) => segment.claimId === claim.id)?.text
+              ?? segments.find((segment) => segment.isClaim)?.text
+              ?? `${claim.domain} · ${claim.task}`;
+            const cleanedSnippet = claimSnippet.trim().replace(/^(["“])/, "").replace(/(["”])$/, "");
+            const quotedSnippet = `“${cleanedSnippet}”`;
+            const cardState = statusKey === "queued" ? "is-queued" : statusKey === "running" ? "is-running" : "is-rest";
+            const summary = buildSummary(claim, status);
+            const diffEntries = status?.diffs?.filter((diff) => {
+              if (!diff || typeof diff !== "object") return Boolean(diff);
+              const reason = typeof diff.reason === "string" ? diff.reason.toLowerCase() : "";
+              return reason !== "metrics" && reason !== "ops" && reason !== "artifacts";
+            });
 
                 return (
                   <div
                     key={claim.id}
-                    className="claim-card"
-                    style={{
-                      background: surfaceMeta.background,
-                      borderColor: surfaceMeta.border,
-                      color: surfaceMeta.text,
-                    }}
-                    onClick={() => setOpenClaimId((current) => (current === claim.id ? null : claim.id))}
+                    className={`claim-card ${cardState}`}
+                    style={{ background: shareTheme.background, color: shareTheme.text }}
                   >
-                    <div className="card-header">
-                      <div className="card-titles">
-                        <div className="card-title">
-                          {claim.domain} / {claim.task}
-                        </div>
-                        <div className="card-meta">
-                          metric: {claim.metric} &bull; ref {reference}
-                        </div>
-                      </div>
-                      <div className="card-actions">
-                        <span
-                          className={`status-chip ${statusKey === "running" ? "chip-pulse" : ""}`}
-                          style={{ background: chipMeta.chipBg, color: chipMeta.chipText }}
-                        >
-                          {chipLabel}
-                        </span>
-                        <button
-                          className="secondary"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void runRepro(claim);
-                          }}
-                          disabled={!canRun(claim.id)}
-                        >
-                          Re-run
-                        </button>
-                      </div>
+                    <div className="share-top">
+                      <span className="share-tag" style={{ color: shareTheme.caption }}>
+                        Claim {index + 1} • {claim.domain} • {claim.task}
+                      </span>
                     </div>
 
-                    <div className="status-summary">
-                      <span className={`summary ${summaryInfo.tone}`}>{summaryInfo.text}</span>
+                    <div className="share-claim-text">
+                      <span
+                        className="share-chip"
+                        style={{
+                          background: shareTheme.accentPrimary,
+                          color: "#FFFFFF",
+                          boxShadow: `0 0 0 1px ${hexToRgba(shareTheme.accentPrimary, 0.4)} inset`,
+                        }}
+                      >
+                        {chipLabel}
+                      </span>
+                      <span className="share-claim-snippet">{quotedSnippet}</span>
                     </div>
 
-                    {status && status.diffs && status.diffs.length > 0 && (
+                    <div className="share-headline" style={{ borderColor: hexToRgba(shareTheme.accentPrimary, 0.55) }}>
+                      <span style={{ color: "#FFFFFF" }}>{summary.headline}</span>
+                    </div>
+
+                    {summary.bullets.length > 0 && (
+                      <ul className="share-summary-list">
+                        {summary.bullets.map((item, index) => (
+                          <li key={index}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {status && diffEntries && diffEntries.length > 0 && (
                       <ul className="diff-list">
-                        {status.diffs.map((diff, index) => (
+                        {diffEntries.map((diff, index) => (
                           <li key={index}>
                             <span className="diff-key">{diff.reason ?? "details"}</span>
                             <span className="diff-value">{diff.message ?? JSON.stringify(diff)}</span>
@@ -662,20 +1222,6 @@ export default function Page() {
                       </ul>
                     )}
 
-                    {isOpen && status && (
-                      <div className="details">
-                        <Receipt
-                          claim={{
-                            id: claim.id,
-                            domain: claim.domain,
-                            task: claim.task,
-                            metric: claim.metric,
-                            reference_score: claim.reference_score,
-                          }}
-                          status={status}
-                        />
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -690,65 +1236,52 @@ export default function Page() {
           align-items: center;
           justify-content: center;
           padding: 48px 16px;
-          background: radial-gradient(circle at top, #172132, #0B0F14 60%);
+          background: radial-gradient(circle at top, #172132, #0B0F14 65%);
           color: #E6EDF3;
         }
 
         .shell {
-          width: min(960px, 100%);
+          width: min(1100px, 100%);
           display: flex;
           flex-direction: column;
-          gap: 20px;
+          gap: 32px;
           text-align: left;
-        }
-
-        h1 {
-          font-size: clamp(2.2rem, 4vw, 3.1rem);
-          margin: 0;
-        }
-
-        .subtitle {
-          margin: 0;
-          color: #9BA7B4;
-          font-size: 1rem;
         }
 
         .claim-input-wrapper {
           position: relative;
           width: 100%;
-          min-height: clamp(36rem, 65vh, 52rem);
-          background: #0F1622;
-          border: 1px solid #223040;
-          border-radius: 18px;
-          box-shadow: 0 26px 45px rgba(8, 12, 20, 0.45);
+          background: #0B0F14;
+          border: 1px solid rgba(230, 237, 243, 0.18);
+          border-radius: 16px;
           transition: border-color 0.18s ease, box-shadow 0.18s ease;
         }
 
         .claim-input-wrapper.is-focused {
-          border-color: #2EA043;
-          box-shadow: 0 0 0 3px rgba(46, 160, 67, 0.25);
+          border-color: rgba(86, 156, 255, 0.65);
+          box-shadow: 0 0 0 3px rgba(86, 156, 255, 0.18);
         }
 
         .claim-input {
           position: relative;
-          z-index: 2;
+          z-index: 1;
           width: 100%;
-          min-height: clamp(36rem, 65vh, 52rem);
-          resize: vertical;
+          min-height: ${MIN_INPUT_HEIGHT}px;
+          resize: none;
           border: none;
           background: transparent;
           color: transparent;
           caret-color: #E6EDF3;
-          font-size: 6.75rem;
-          line-height: 1.1;
-          padding: 36px;
+          font-size: 2.25rem;
+          line-height: 1.3;
+          padding: 24px 176px 24px 24px;
           font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-          overflow: auto;
+          overflow: hidden;
           text-align: left;
         }
 
         .claim-input::placeholder {
-          color: transparent;
+          color: rgba(64, 80, 100, 0.45);
         }
 
         .claim-input:focus {
@@ -758,14 +1291,14 @@ export default function Page() {
         .claim-input-highlights {
           position: absolute;
           inset: 0;
-          padding: 36px;
+          padding: 24px 176px 24px 24px;
           color: #E6EDF3;
-          font-size: 6.75rem;
-          line-height: 1.1;
+          font-size: 2.25rem;
+          line-height: 1.3;
           font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
           pointer-events: none;
           overflow: hidden;
-          z-index: 1;
+          z-index: 0;
           text-align: left;
         }
 
@@ -777,43 +1310,54 @@ export default function Page() {
         }
 
         .claim-placeholder {
-          color: #9BA7B4;
+          color: rgba(120, 137, 160, 0.4);
         }
 
         .claim-plain {
-          color: rgba(230, 237, 243, 0.82);
+          color: rgba(230, 237, 243, 0.78);
         }
 
         .highlight-segment {
           text-decoration-line: underline;
-          text-decoration-thickness: 0.18em;
-          text-decoration-skip-ink: none;
+          text-decoration-thickness: 0.12em;
+          text-decoration-skip-ink: auto;
           font-weight: 600;
           border-radius: 10px;
-          padding: 0.05em 0.18em;
+          padding: 0.08em 0.18em;
           margin: 0 -0.05em;
-          transition: background-color 0.2s ease, color 0.2s ease;
+          transition: color 0.2s ease, text-decoration-color 0.2s ease, background-color 0.2s ease;
         }
 
         .highlight-segment.verdict-no_evidence {
           text-decoration-style: dotted;
+          background-color: rgba(148, 163, 184, 0.18);
+          color: #C7D2FE;
+          text-decoration-color: rgba(148, 163, 184, 0.75);
+          box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.28);
         }
 
         .highlight-segment.verdict-likely_true {
           text-decoration-style: dashed;
+          background-color: rgba(245, 158, 11, 0.24);
+          color: #FED7AA;
+          text-decoration-color: rgba(245, 158, 11, 0.9);
+          box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.35);
         }
 
         .highlight-segment.verdict-likely_exaggerated {
           text-decoration-style: double;
+          background-color: rgba(248, 81, 73, 0.22);
+          color: #FCA5A5;
+          text-decoration-color: rgba(248, 81, 73, 0.85);
+          box-shadow: inset 0 0 0 1px rgba(248, 81, 73, 0.32);
         }
 
         .highlight-segment.verdict-true_replicated {
           text-decoration-style: solid;
-        }
-
-        .actions {
-          display: flex;
-          justify-content: center;
+          background-color: rgba(46, 160, 67, 0.26);
+          color: #B7F7C4;
+          text-decoration-color: rgba(46, 160, 67, 0.9);
+          box-shadow: inset 0 0 0 1px rgba(46, 160, 67, 0.35);
         }
 
         button {
@@ -834,18 +1378,41 @@ export default function Page() {
         }
 
         .primary {
-          padding: 15px 44px;
+          padding: 14px 42px;
           background: linear-gradient(135deg, #2EA043, #3FB950);
           color: #0B0F14;
-          font-size: 1.08rem;
+          font-size: 1.05rem;
           box-shadow: 0 16px 32px rgba(46, 160, 67, 0.35);
         }
 
         .secondary {
           padding: 7px 16px;
-          background: #19202C;
-          color: #9BA7B4;
-          border: 1px solid #2A3545;
+          background: rgba(25, 32, 44, 0.85);
+          color: #E6EDF3;
+          border: 1px solid rgba(230, 237, 243, 0.18);
+        }
+
+        .validate-action {
+          position: absolute;
+          bottom: 20px;
+          right: 20px;
+          z-index: 2;
+        }
+
+        .claim-tooltip {
+          position: absolute;
+          pointer-events: none;
+          background: rgba(11, 15, 20, 0.94);
+          border: 1px solid rgba(230, 237, 243, 0.25);
+          border-radius: 8px;
+          padding: 8px 12px;
+          color: #E6EDF3;
+          font-size: 0.85rem;
+          line-height: 1.3;
+          max-width: 260px;
+          transform: translate(-50%, calc(-100% - 14px));
+          box-shadow: 0 16px 32px rgba(0, 0, 0, 0.35);
+          white-space: normal;
         }
 
         .status-banner {
@@ -869,134 +1436,148 @@ export default function Page() {
         }
 
         .results {
-          text-align: left;
           display: flex;
           flex-direction: column;
-          gap: 16px;
-          margin-top: 16px;
+          gap: 18px;
         }
 
         .results h2 {
           margin: 0;
-          font-size: 1.4rem;
+          font-size: 1.35rem;
         }
 
         .claim-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+          gap: 20px;
         }
 
         .claim-card {
-          border: 1px solid;
-          border-radius: 16px;
-          padding: 18px 22px;
-          cursor: pointer;
-          transition: border-color 0.2s ease, transform 0.15s ease;
-          box-shadow: 0 12px 24px rgba(8, 12, 20, 0.35);
+          position: relative;
+          border-radius: 24px;
+          padding: 26px 30px;
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+          transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease, opacity 0.2s ease;
+          box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
         }
 
-        .claim-card:hover {
-          transform: translateY(-2px);
+        .claim-card.is-queued {
+          opacity: 0.62;
+          filter: grayscale(0.4) brightness(0.85);
         }
 
-        .card-header {
+        .claim-card.is-running,
+        .claim-card.is-running,
+        .claim-card.is-rest {
+          opacity: 1;
+          filter: none;
+        }
+
+        .claim-card.is-rest:hover,
+        .claim-card.is-running:hover {
+          transform: translateY(-6px);
+          box-shadow: 0 32px 64px rgba(0, 0, 0, 0.4);
+        }
+
+        .share-top {
           display: flex;
           justify-content: space-between;
-          gap: 12px;
           align-items: flex-start;
+          gap: 16px;
         }
 
-        .card-titles {
-          text-align: left;
-        }
-
-        .card-title {
+        .share-tag {
+          font-size: 0.78rem;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
           font-weight: 600;
-          font-size: 1.05rem;
         }
 
-        .card-meta {
-          font-size: 0.85rem;
-          color: rgba(230, 237, 243, 0.65);
-          margin-top: 2px;
-        }
-
-        .card-actions {
+        .share-claim-text {
           display: flex;
-          gap: 10px;
-          align-items: center;
+          flex-direction: column;
+          gap: 8px;
         }
 
-        .status-chip {
+        .share-chip {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          padding: 6px 14px;
-          border-radius: 999px;
-          font-size: 0.8rem;
+          padding: 14px 22px;
+          border-radius: 18px;
+          font-size: clamp(2rem, 4vw, 2.6rem);
+          font-weight: 700;
+          font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+          color: #FFFFFF;
+          align-self: stretch;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          text-align: center;
+        }
+
+        .share-claim-snippet {
+          font-size: 1.2rem;
+          color: #FFFFFF;
+          line-height: 1.4;
           font-weight: 600;
-          min-width: 88px;
         }
 
-        .chip-pulse {
-          position: relative;
+        .share-headline {
+          padding: 10px 14px;
+          border-radius: 12px;
+          background: rgba(11, 20, 35, 0.75);
+          border: 1px solid;
+          font-size: 1.05rem;
+          font-weight: 700;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
         }
 
-        .chip-pulse::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          border-radius: inherit;
-          border: 1px solid currentColor;
-          opacity: 0.5;
-          animation: pulse-ring 1.6s ease-in-out infinite;
-        }
-
-        .status-summary {
-          margin-top: 12px;
-          font-size: 0.9rem;
-        }
-
-        .summary {
-          padding: 6px 10px;
-          border-radius: 999px;
-          font-weight: 500;
-        }
-
-        .summary.positive {
-          background: rgba(46, 160, 67, 0.18);
-          color: #89F7A5;
-        }
-
-        .summary.negative {
-          background: rgba(248, 81, 73, 0.2);
-          color: #FFC7C3;
-        }
-
-        .summary.indigo {
-          background: rgba(91, 121, 255, 0.18);
-          color: #C7D3FF;
-        }
-
-        .summary.muted {
-          background: rgba(155, 167, 180, 0.15);
-          color: #C0CAD4;
-        }
-
-        .summary.warning {
-          background: rgba(245, 158, 11, 0.22);
-          color: #FDE68A;
+        .share-rerun {
+          background: rgba(11, 15, 20, 0.25);
+          border-color: rgba(255, 255, 255, 0.22);
+          color: inherit;
+          align-self: flex-start;
         }
 
         .diff-list {
-          margin: 12px 0 0;
+          margin: 12px 0 8px;
           padding: 0;
           list-style: none;
           display: flex;
           flex-direction: column;
           gap: 6px;
-          font-size: 0.85rem;
+          font-size: 0.9rem;
+        }
+
+        .share-summary-list {
+          margin: 8px 0 14px;
+          padding: 12px 16px;
+          list-style: none;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          font-size: 0.95rem;
+          color: rgba(248, 250, 252, 0.92);
+          background: rgba(15, 23, 42, 0.55);
+          border-radius: 12px;
+          border: 1px solid rgba(248, 250, 252, 0.12);
+        }
+
+        .share-summary-list li {
+          padding-left: 18px;
+          position: relative;
+        }
+
+        .share-summary-list li::before {
+          content: "▌";
+          position: absolute;
+          left: 0;
+          top: 0;
+          color: rgba(248, 250, 252, 0.7);
         }
 
         .diff-list li {
@@ -1008,17 +1589,11 @@ export default function Page() {
         .diff-key {
           text-transform: capitalize;
           font-weight: 600;
-          color: rgba(230, 237, 243, 0.8);
+          color: rgba(230, 237, 243, 0.9);
         }
 
         .diff-value {
-          color: rgba(230, 237, 243, 0.68);
-        }
-
-        .details {
-          margin-top: 18px;
-          border-top: 1px solid rgba(255, 255, 255, 0.1);
-          padding-top: 18px;
+          color: rgba(230, 237, 243, 0.8);
         }
 
         @keyframes pulse {
@@ -1049,26 +1624,33 @@ export default function Page() {
         }
 
         @media (max-width: 640px) {
-          .claim-input-wrapper,
           .claim-input {
-            min-height: 18rem;
+            font-size: 1.65rem;
+            padding: 18px 132px 18px 18px;
           }
 
-          .claim-input,
           .claim-input-highlights {
-            font-size: 3rem;
-            line-height: 1.25;
-            padding: 20px;
+            font-size: 1.65rem;
+            padding: 18px 132px 18px 18px;
           }
 
-          .card-header {
-            flex-direction: column;
-            align-items: flex-start;
+          .validate-action {
+            bottom: 14px;
+            right: 14px;
           }
 
-          .card-actions {
-            align-self: stretch;
-            justify-content: space-between;
+          .claim-list {
+            grid-template-columns: 1fr;
+            gap: 18px;
+          }
+
+          .claim-card {
+            padding: 28px 24px;
+            gap: 22px;
+          }
+
+          .share-claim-text {
+            gap: 6px;
           }
         }
       `}</style>
