@@ -394,8 +394,34 @@ def run_coding_competition(
         is_primary: bool,
     ) -> Tuple[int, bool, int, ModelInvocation, TaskResult]:
         prompt = task_data.get("prompt")
-        invocation = _call_model(cfg, prompt, temperature)
-        result = _run_tests(task_data, invocation.response)
+        model_name = cfg.get("name", "unknown")
+        provider = cfg.get("provider", "unknown")
+        try:
+            invocation = _call_model(cfg, prompt, temperature)
+            result = _run_tests(task_data, invocation.response)
+        except Exception as exc:  # pragma: no cover - external API errors dominate here
+            logger.exception(
+                "coding_competition model invocation failed",
+                extra={
+                    "task": task_data.get("id"),
+                    "model": model_name,
+                    "provider": provider,
+                },
+            )
+            invocation = ModelInvocation(
+                model=model_name,
+                provider=provider,
+                response="",
+                input_tokens=0,
+                output_tokens=0,
+                latency_s=0.0,
+            )
+            result = TaskResult(
+                task_id=str(task_data.get("id")),
+                success=False,
+                test_latency_s=0.0,
+                stderr=str(exc)[:500],
+            )
         return task_pos, is_primary, comparator_index, invocation, result
 
     logger.info(
