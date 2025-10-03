@@ -142,12 +142,17 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
             raise CodingBenchError("OPENAI_API_KEY not configured")
         client = OpenAI(api_key=api_key)
         t0 = time.time()
+        extra_kwargs: Dict[str, Any] = {}
+        if isinstance(name, str) and name.startswith("gpt-5"):
+            extra_kwargs["reasoning"] = {"effort": "low"}
+            extra_kwargs["text"] = {"verbosity": "low"}
         if hasattr(client, "responses"):
             response = client.responses.create(
                 model=name,
                 input=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
                 temperature=temperature,
                 max_output_tokens=2048,
+                **extra_kwargs,
             )
             latency = time.time() - t0
             text = "".join(part.text for part in response.output_text)
