@@ -489,11 +489,33 @@ def process_one(run_id: str, claim_id: str) -> None:
                 )
                 return
             temperature = float(settings.get("temperature") or 0.0)
+            progress_cache: Dict[str, Any] = {}
+            last_progress_at = 0.0
+
+            def _report_progress(snapshot: Dict[str, Any]) -> None:
+                nonlocal progress_cache, last_progress_at
+                progress_cache = snapshot
+                now = time.time()
+                should_flush = snapshot.get("units_completed") == snapshot.get("units_total")
+                if not should_flush and now - last_progress_at < 1.0:
+                    return
+                last_progress_at = now
+                try:
+                    conn.execute(
+                        text("UPDATE runs SET ops=:ops WHERE id=:id"),
+                        {"id": run_id, "ops": json.dumps({"progress": snapshot})},
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    logger.exception("failed to persist coding progress for %s", run_id)
+
             try:
                 results = run_coding_competition(
                     primary_config=model_cfg,
                     comparator_configs=comp_cfgs,
                     temperature=temperature,
+                    progress_callback=_report_progress,
                 )
             except CodingBenchError as exc:
                 logger.exception("Coding competition harness failed for %s", run_id)
@@ -534,6 +556,35 @@ def process_one(run_id: str, claim_id: str) -> None:
                     }
                 )
 
+            baseline_rate = baseline.get("pass_rate")
+            if baseline_rate is not None:
+                underperformers: Dict[str, Any] = {}
+                for comp in comparators_info:
+                    comp_rate = comp.get("pass_rate")
+                    if comp_rate is None:
+                        continue
+                    if baseline_rate <= comp_rate:
+                        label = comp.get("model") or f"comparator@{comp.get('provider', 'unknown')}"
+                        underperformers[label] = {
+                            "pass_rate": comp_rate,
+                            "passed": comp.get("passed"),
+                            "attempted": comp.get("attempted"),
+                        }
+                if underperformers:
+                    status_label = "Not Reproduced"
+                    diff_entries.append(
+                        {
+                            "reason": "comparison_deficit",
+                            "message": "Baseline does not exceed comparator pass rates.",
+                            "comparators": underperformers,
+                            **_comparison_details(),
+                        }
+                    )
+
+            final_ops = {"tasks": baseline.get("attempted")}
+            if progress_cache:
+                final_ops["progress"] = progress_cache
+
             conn.execute(
                 text(
                     """
@@ -549,7 +600,7 @@ def process_one(run_id: str, claim_id: str) -> None:
                     "score_value": baseline.get("pass_rate"),
                     "ci_lower": None,
                     "ci_upper": None,
-                    "ops": json.dumps({"tasks": baseline.get("attempted")}),
+                    "ops": json.dumps(final_ops),
                     "diffs": json.dumps(diff_entries),
                     "status_label": status_label,
                     "trace_id": trace_id,
@@ -750,13 +801,23 @@ def process_one(run_id: str, claim_id: str) -> None:
                 diff_entries: list[Dict[str, Any]] = []
                 if requires_comparison:
                     status_label = "Underspecified"
-                    diff_entries.append(
-                        {
-                            "reason": "missing_comparator",
-                            "message": "Comparative claim evaluated without competitor baselines.",
-                            **_comparison_details(),
-                        }
-                    )
+                    if comparators:
+                        diff_entries.append(
+                            {
+                                "reason": "comparison_pending",
+                                "message": "Comparator baselines pending for reasoning-math harness.",
+                                "comparators": comparators,
+                                **_comparison_details(),
+                            }
+                        )
+                    else:
+                        diff_entries.append(
+                            {
+                                "reason": "missing_comparator",
+                                "message": "Comparative claim evaluated without competitor baselines.",
+                                **_comparison_details(),
+                            }
+                        )
                 conn.execute(
                     text(
                         """
@@ -990,13 +1051,23 @@ def process_one(run_id: str, claim_id: str) -> None:
                 diff_entries: list[Dict[str, Any]] = []
                 if requires_comparison:
                     status_label = "Underspecified"
-                    diff_entries.append(
-                        {
-                            "reason": "missing_comparator",
-                            "message": "Comparative claim evaluated without competitor baselines.",
-                            **_comparison_details(),
-                        }
-                    )
+                    if comparators:
+                        diff_entries.append(
+                            {
+                                "reason": "comparison_pending",
+                                "message": "Comparator baselines pending for coding harness.",
+                                "comparators": comparators,
+                                **_comparison_details(),
+                            }
+                        )
+                    else:
+                        diff_entries.append(
+                            {
+                                "reason": "missing_comparator",
+                                "message": "Comparative claim evaluated without competitor baselines.",
+                                **_comparison_details(),
+                            }
+                        )
                 conn.execute(
                     text(
                         """
@@ -1241,13 +1312,23 @@ def process_one(run_id: str, claim_id: str) -> None:
                 diff_entries.append(dict(entry))
         if requires_comparison:
             status_label = "Underspecified"
-            diff_entries.append(
-                {
-                    "reason": "missing_comparator",
-                    "message": "Comparative claim evaluated without competitor baselines.",
-                    **_comparison_details(),
-                }
-            )
+            if comparators:
+                diff_entries.append(
+                    {
+                        "reason": "comparison_pending",
+                        "message": "Comparator baselines pending for this harness.",
+                        "comparators": comparators,
+                        **_comparison_details(),
+                    }
+                )
+            else:
+                diff_entries.append(
+                    {
+                        "reason": "missing_comparator",
+                        "message": "Comparative claim evaluated without competitor baselines.",
+                        **_comparison_details(),
+                    }
+                )
         conn.execute(
             text(
                 """

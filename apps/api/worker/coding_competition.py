@@ -347,6 +347,7 @@ def run_coding_competition(
     comparator_configs: List[Dict[str, Any]],
     temperature: float = 0.0,
     max_workers: Optional[int] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     tasks_data = list(tasks) if tasks else _load_tasks()
     if not tasks_data:
@@ -434,6 +435,11 @@ def run_coding_competition(
     )
 
     futures = []
+    start_time = time.time()
+    total_units = total_models * num_tasks
+    completed_units = 0
+    completed_tasks = 0
+    task_finished = [False] * num_tasks
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for task_pos, task in active_tasks:
             futures.append(
@@ -468,6 +474,42 @@ def run_coding_competition(
                 primary_results[target_idx] = result
             else:
                 comparator_invocations[target_idx][comparator_index] = (invocation, result)
+
+            completed_units += 1
+            if target_idx is not None and not task_finished[target_idx]:
+                if primary_results[target_idx] is not None and all(value is not None for value in comparator_invocations[target_idx]):
+                    task_finished[target_idx] = True
+                    completed_tasks += 1
+
+            if progress_callback and completed_units > 0:
+                elapsed = time.time() - start_time
+                remaining_units = max(total_units - completed_units, 0)
+                avg_per_unit = elapsed / completed_units if completed_units else None
+                eta = avg_per_unit * remaining_units if avg_per_unit else None
+                progress_callback(
+                    {
+                        "units_completed": completed_units,
+                        "units_total": total_units,
+                        "tasks_completed": completed_tasks,
+                        "tasks_total": num_tasks,
+                        "elapsed_seconds": elapsed,
+                        "eta_seconds": eta,
+                    }
+                )
+
+    elapsed_total = time.time() - start_time
+
+    if progress_callback:
+        progress_callback(
+            {
+                "units_completed": total_units,
+                "units_total": total_units,
+                "tasks_completed": num_tasks,
+                "tasks_total": num_tasks,
+                "elapsed_seconds": elapsed_total,
+                "eta_seconds": 0.0,
+            }
+        )
 
     logger.info(
         "coding_competition complete",
@@ -565,6 +607,14 @@ def run_coding_competition(
         "baseline": baseline_summary,
         "comparators": comparator_outputs,
         "tasks": per_task,
+        "progress": {
+            "units_completed": total_units,
+            "units_total": total_units,
+            "tasks_completed": num_tasks,
+            "tasks_total": num_tasks,
+            "elapsed_seconds": elapsed_total,
+            "eta_seconds": 0.0,
+        },
     }
 _GEMINI_DISCOVERY_CACHE: Dict[str, str] = {}
 _GEMINI_DISCOVERY_TS = 0.0

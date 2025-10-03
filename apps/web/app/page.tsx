@@ -194,6 +194,59 @@ const WORKING_MESSAGES = [
   "Capturing ops telemetry",
 ];
 
+type ProgressSnapshot = {
+  unitsCompleted: number;
+  unitsTotal: number;
+  tasksCompleted?: number;
+  tasksTotal?: number;
+  etaSeconds?: number | null;
+  elapsedSeconds?: number | null;
+};
+
+function extractProgress(status: RunStatus | undefined): ProgressSnapshot | undefined {
+  if (!status || !status.ops || typeof status.ops !== "object") return undefined;
+  const raw = (status.ops as Record<string, any>).progress;
+  if (!raw || typeof raw !== "object") return undefined;
+
+  const unitsCompleted = Number(raw.units_completed ?? raw.unitsCompleted ?? 0);
+  const unitsTotal = Number(raw.units_total ?? raw.unitsTotal ?? 0);
+  if (!Number.isFinite(unitsCompleted) || !Number.isFinite(unitsTotal) || unitsTotal <= 0) {
+    return undefined;
+  }
+
+  const tasksCompletedRaw = raw.tasks_completed ?? raw.tasksCompleted;
+  const tasksTotalRaw = raw.tasks_total ?? raw.tasksTotal;
+  const tasksCompleted = typeof tasksCompletedRaw === "number" ? tasksCompletedRaw : undefined;
+  const tasksTotal = typeof tasksTotalRaw === "number" ? tasksTotalRaw : undefined;
+  const etaSecondsRaw = raw.eta_seconds ?? raw.etaSeconds;
+  const elapsedRaw = raw.elapsed_seconds ?? raw.elapsedSeconds;
+  return {
+    unitsCompleted,
+    unitsTotal,
+    tasksCompleted,
+    tasksTotal,
+    etaSeconds: typeof etaSecondsRaw === "number" && Number.isFinite(etaSecondsRaw) ? Math.max(etaSecondsRaw, 0) : undefined,
+    elapsedSeconds: typeof elapsedRaw === "number" && Number.isFinite(elapsedRaw) ? Math.max(elapsedRaw, 0) : undefined,
+  };
+}
+
+function formatEta(seconds?: number | null): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null;
+  if (seconds < 1) return "<1s";
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (mins === 0) return `${secs}s`;
+  if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hours < 24) {
+    return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
+}
+
 const MIN_INPUT_HEIGHT = 64;
 
 const DOMAIN_SUMMARY: Record<string, { success: string; caveat: string }> = {
@@ -918,15 +971,38 @@ export default function Page() {
 
   const statusMessage = useMemo(() => {
     if (isSubmitting) return "Parsing claim";
-    if (
-      claims.some((claim) => {
-        const status = runStatus[claim.id]?.status;
-        return status === "queued" || status === "running";
-      })
-    ) {
-      return "Running validations";
+    const runningStatuses = claims
+      .map((claim) => runStatus[claim.id])
+      .filter((status): status is RunStatus => Boolean(status && status.status === "running"));
+    if (runningStatuses.length === 0) {
+      const hasQueued = claims.some((claim) => runStatus[claim.id]?.status === "queued");
+      return hasQueued ? "Queued for validation" : null;
     }
-    return null;
+
+    let completedUnits = 0;
+    let totalUnits = 0;
+    let etaSeconds: number | undefined;
+
+    for (const status of runningStatuses) {
+      const snapshot = extractProgress(status);
+      if (!snapshot) continue;
+      completedUnits += snapshot.unitsCompleted;
+      totalUnits += snapshot.unitsTotal;
+      if (snapshot.etaSeconds !== undefined) {
+        etaSeconds = etaSeconds === undefined ? snapshot.etaSeconds : Math.max(etaSeconds, snapshot.etaSeconds ?? 0);
+      }
+    }
+
+    if (totalUnits > 0) {
+      const percent = Math.min(100, Math.max(0, Math.round((completedUnits / totalUnits) * 100)));
+      const etaLabel = formatEta(etaSeconds);
+      if (etaLabel) {
+        return `Running validations · ${percent}% complete · ETA ${etaLabel}`;
+      }
+      return `Running validations · ${percent}% complete`;
+    }
+
+    return "Running validations";
   }, [claims, isSubmitting, runStatus]);
 
   const highlightNodes = useMemo<ReactNode[]>(() => {
@@ -1508,8 +1584,18 @@ export default function Page() {
               boxShadow: `0 0 0 1px ${hexToRgba(shareTheme.accentSecondary, 0.55)} inset`,
             } as const;
             const isRunning = statusKey === "running";
-            const progressIndicator = null;
             const workingLabel = WORKING_MESSAGES[workingLabelIndex[claim.id] ?? 0];
+            const progress = extractProgress(status);
+            const progressUnits = progress ? Math.min(progress.unitsCompleted, progress.unitsTotal) : 0;
+            const progressPercent = progress ? Math.min(100, Math.max(0, (progressUnits / progress.unitsTotal) * 100)) : undefined;
+            const tasksTotal = progress?.tasksTotal && progress.tasksTotal > 0 ? progress.tasksTotal : undefined;
+            const tasksCompleted = tasksTotal !== undefined ? Math.min(progress?.tasksCompleted ?? 0, tasksTotal) : undefined;
+            const taskLabel = progress
+              ? tasksTotal !== undefined
+                ? `${tasksCompleted ?? 0}/${tasksTotal} tasks`
+                : `${progressUnits}/${progress.unitsTotal} steps`
+              : null;
+            const etaLabel = formatEta(progress?.etaSeconds);
 
                 return (
                   <div
@@ -1523,8 +1609,6 @@ export default function Page() {
                       </span>
                       <span className="share-claim-title">{quotedSnippet}</span>
                     </div>
-
-                    {progressIndicator}
 
                     <div className="share-claim-text">
                       <span
@@ -1540,13 +1624,31 @@ export default function Page() {
                     </div>
 
                     {isRunning ? (
-                      <div className="share-working">
-                        <div className="share-working-glow" aria-hidden="true" />
-                        <div className="share-working-content">
-                          <span className="share-working-spinner" aria-hidden="true" />
-                          <span className="share-working-text">{workingLabel}</span>
+                      progress ? (
+                        <div className="claim-progress" role="group" aria-label="Evaluation progress">
+                          <div className="claim-progress-header">
+                            <span>{taskLabel}</span>
+                            {etaLabel ? <span className="claim-progress-eta">ETA {etaLabel}</span> : null}
+                          </div>
+                          <div
+                            className="claim-progress-bar"
+                            role="progressbar"
+                            aria-valuenow={Math.round(progressPercent ?? 0)}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                          >
+                            <div className="claim-progress-fill" style={{ width: `${progressPercent ?? 0}%` }} />
+                          </div>
                         </div>
-                      </div>
+                      ) : (
+                        <div className="share-working">
+                          <div className="share-working-glow" aria-hidden="true" />
+                          <div className="share-working-content">
+                            <span className="share-working-spinner" aria-hidden="true" />
+                            <span className="share-working-text">{workingLabel}</span>
+                          </div>
+                        </div>
+                      )
                     ) : (
                       <div className="share-headline" style={{ borderColor: hexToRgba(shareTheme.accentPrimary, 0.55) }}>
                         <span style={{ color: "#FFFFFF" }}>{summary.headline}</span>
@@ -1908,6 +2010,49 @@ export default function Page() {
           gap: 10px;
           font-size: 0.85rem;
           letter-spacing: 0.01em;
+        }
+
+        .claim-progress {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          background: rgba(9, 15, 25, 0.6);
+          border-radius: 14px;
+          padding: 14px 18px;
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          backdrop-filter: blur(10px);
+        }
+
+        .claim-progress-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          font-size: 0.85rem;
+          letter-spacing: 0.02em;
+          color: rgba(228, 233, 247, 0.85);
+        }
+
+        .claim-progress-eta {
+          font-weight: 600;
+          color: rgba(236, 243, 255, 0.85);
+        }
+
+        .claim-progress-bar {
+          position: relative;
+          width: 100%;
+          height: 8px;
+          background: rgba(34, 46, 66, 0.65);
+          border-radius: 999px;
+          overflow: hidden;
+        }
+
+        .claim-progress-fill {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(90deg, rgba(99, 102, 241, 0.9), rgba(59, 130, 246, 0.95));
+          box-shadow: 0 0 18px rgba(99, 102, 241, 0.45);
+          border-radius: 999px;
+          transition: width 0.3s ease;
         }
 
         .share-progress-dot {

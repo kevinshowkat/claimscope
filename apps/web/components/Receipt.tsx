@@ -199,7 +199,7 @@ export function Receipt({ claim, status }: ReceiptProps) {
 
   const opsItems: Array<[string, string]> = [];
   if (status.ops) {
-    const { p95_latency_s, tokens_prompt, tokens_output, cost_usd, ...rest } = status.ops;
+    const { p95_latency_s, tokens_prompt, tokens_output, cost_usd, progress, ...rest } = status.ops;
     if (typeof p95_latency_s === "number") opsItems.push(["p95 latency", `${p95_latency_s}s`]);
     if (typeof tokens_prompt === "number") opsItems.push(["tokens in", String(tokens_prompt)]);
     if (typeof tokens_output === "number") opsItems.push(["tokens out", String(tokens_output)]);
