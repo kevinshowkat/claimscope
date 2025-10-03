@@ -620,7 +620,8 @@ function buildSummary(claim: Claim, status: RunStatus | undefined) {
 
   if (current.status === "succeeded") {
     const statusLabel = current.status_label ?? "Replicated";
-    if (statusLabel === "Replicated") {
+    const normalizedLabel = statusLabel.toLowerCase();
+    if (normalizedLabel === "replicated") {
       headline = `All ${claim.task} checks passed.`;
       const domainCopy = DOMAIN_SUMMARY[claim.domain];
       if (domainCopy) {
@@ -633,13 +634,21 @@ function buildSummary(claim: Claim, status: RunStatus | undefined) {
         );
       }
       pushDiffBullets();
-    } else if (statusLabel === "Underspecified") {
+    } else if (normalizedLabel === "underspecified") {
       headline = "Evidence is incomplete for this claim.";
       bullets.push("We need comparative or grounding data before calling this true.");
       pushDiffBullets();
       if (current.ops?.p95_latency_s) {
         bullets.push(
           `Harness run finished (p95 ${current.ops.p95_latency_s.toFixed(2)}s), but verdict is withheld.`,
+        );
+      }
+    } else if (normalizedLabel === "not reproduced") {
+      headline = `Claim not reproduced on ${claim.task}.`;
+      pushDiffBullets();
+      if (current.ops?.p95_latency_s) {
+        bullets.push(
+          `Run completed with p95 latency ${current.ops.p95_latency_s.toFixed(2)}s; comparator results exceeded the claimant model.`,
         );
       }
     } else {
@@ -737,6 +746,9 @@ function resolveVerdict(claim: Claim | undefined, status: RunStatus | undefined)
       const statusLabel = status.status_label?.toLowerCase();
       if (statusLabel === "underspecified") {
         return "no_evidence";
+      }
+      if (statusLabel === "not reproduced") {
+        return "likely_exaggerated";
       }
       const value = status.scores?.value;
       const reference = typeof claim?.reference_score === "number" ? claim.reference_score : undefined;
@@ -1331,8 +1343,29 @@ export default function Page() {
             <div className="claim-list">
               {claims.map((claim, index) => {
                 const status = runStatus[claim.id];
-                const statusKey: RunStatus["status"] | "idle" = status?.status ?? "idle";
-                const verdict = resolveVerdict(claim, status);
+                const rawDiffs = (status?.diffs ?? []).filter(
+                  (diff): diff is Record<string, unknown> => Boolean(diff && typeof diff === "object")
+                );
+                const hasComparisonDeficit = rawDiffs.some(
+                  (diff) => typeof diff.reason === "string" && diff.reason.toLowerCase() === "comparison_deficit"
+                );
+                const adjustedStatusLabel = (() => {
+                  const original = status?.status_label ?? null;
+                  if (hasComparisonDeficit) {
+                    if (!original || original.toLowerCase() === "replicated") {
+                      return "Not Reproduced" as const;
+                    }
+                  }
+                  return original ?? undefined;
+                })();
+                const adjustedStatus = status
+                  ? {
+                      ...status,
+                      status_label: adjustedStatusLabel,
+                    }
+                  : status;
+                const statusKey: RunStatus["status"] | "idle" = adjustedStatus?.status ?? "idle";
+                const verdict = resolveVerdict(claim, adjustedStatus);
             const chipLabel = statusKey === "queued" || statusKey === "running"
               ? STATUS_META[statusKey].label
               : VERDICT_META[verdict].label;
@@ -1351,8 +1384,38 @@ export default function Page() {
             const cleanedSnippet = claimSnippet.trim().replace(/^(["“])/, "").replace(/(["”])$/, "");
             const quotedSnippet = `“${cleanedSnippet}”`;
             const cardState = statusKey === "queued" ? "is-queued" : statusKey === "running" ? "is-running" : "is-rest";
-            const summary = buildSummary(claim, status);
-            const diffEntries = (status?.diffs ?? [])
+            const summary = buildSummary(claim, adjustedStatus);
+            const competitionStats = (() => {
+              const scoped = rawDiffs
+                .filter((diff) => {
+                  const reason = typeof diff.reason === "string" ? diff.reason.toLowerCase() : "";
+                  return reason === "baseline" || reason === "comparator";
+                })
+                .map((diff) => {
+                  const reason = typeof diff.reason === "string" ? diff.reason.toLowerCase() : "";
+                  const passed = typeof diff.passed === "number" ? diff.passed : undefined;
+                  const attempted = typeof diff.attempted === "number" ? diff.attempted : undefined;
+                  const rate = typeof diff.pass_rate === "number" ? diff.pass_rate : undefined;
+                  const latency = typeof diff.avg_latency_s === "number" ? diff.avg_latency_s : undefined;
+                  const label = typeof diff.message === "string" && diff.message
+                    ? diff.message
+                    : typeof diff.model === "string" && diff.model
+                      ? diff.model
+                      : reason === "baseline"
+                        ? "Baseline"
+                        : "Comparator";
+                  return { label, passed, attempted, rate, latency, kind: reason };
+                });
+              if (scoped.length <= 1) {
+                return [] as Array<typeof scoped[number] & { width: number }>;
+              }
+              const maxRate = Math.max(...scoped.map((item) => item.rate ?? 0));
+              return scoped.map((item) => ({
+                ...item,
+                width: maxRate > 0 ? Math.max(8, Math.round(((item.rate ?? 0) / maxRate) * 100)) : 0,
+              }));
+            })();
+            const diffEntries = rawDiffs
               .map((diff) => {
                 if (!diff) return null;
                 if (typeof diff !== "object") {
@@ -1369,7 +1432,46 @@ export default function Page() {
                 const messageCandidates = [diff.message, diff.details].map((value) =>
                   typeof value === "string" ? value.trim() : ""
                 );
-                const message = messageCandidates.find((value) => value);
+                let message = messageCandidates.find((value) => value);
+
+                const formatPassDetails = () => {
+                  const attempted = typeof diff.attempted === "number" ? diff.attempted : undefined;
+                  const passed = typeof diff.passed === "number" ? diff.passed : undefined;
+                  const passRate = typeof diff.pass_rate === "number" ? diff.pass_rate : undefined;
+                  const avgLatency = typeof diff.avg_latency_s === "number" ? diff.avg_latency_s : undefined;
+                  const inputTokens = typeof diff.input_tokens === "number" ? diff.input_tokens : undefined;
+                  const outputTokens = typeof diff.output_tokens === "number" ? diff.output_tokens : undefined;
+
+                  const parts: string[] = [];
+                  if (passed !== undefined && attempted !== undefined) {
+                    parts.push(`${passed}/${attempted} passed`);
+                  }
+                  if (passRate !== undefined) {
+                    parts.push(`${(passRate * 100).toFixed(0)}% pass rate`);
+                  }
+                  if (avgLatency !== undefined) {
+                    parts.push(`${avgLatency.toFixed(2)}s avg latency`);
+                  }
+                  if (inputTokens !== undefined || outputTokens !== undefined) {
+                    const tokenParts: string[] = [];
+                    if (inputTokens !== undefined) tokenParts.push(`in ${inputTokens}`);
+                    if (outputTokens !== undefined) tokenParts.push(`out ${outputTokens}`);
+                    if (tokenParts.length > 0) {
+                      parts.push(`tokens ${tokenParts.join(" / ")}`);
+                    }
+                  }
+                  return parts.length ? parts.join(" · ") : undefined;
+                };
+
+                if ((reasonKey === "baseline" || reasonKey === "comparator") && !message) {
+                  message = formatPassDetails();
+                } else if (reasonKey === "comparator" || reasonKey === "baseline") {
+                  const extras = formatPassDetails();
+                  if (extras) {
+                    message = `${message ?? ""}${message ? ": " : ""}${extras}`;
+                  }
+                }
+
                 if (message) {
                   return { reason: rawReason, message };
                 }
@@ -1457,6 +1559,34 @@ export default function Page() {
                           <li key={index}>{item}</li>
                         ))}
                       </ul>
+                    )}
+
+                    {competitionStats.length > 1 && (
+                      <div className="share-compare-grid">
+                        {competitionStats.map((item, idx) => {
+                          const percent = item.rate !== undefined ? `${Math.round(item.rate * 100)}%` : "–";
+                          const attempts =
+                            item.passed !== undefined && item.attempted !== undefined
+                              ? `${item.passed}/${item.attempted} passed`
+                              : undefined;
+                          const latency = item.latency !== undefined ? `${item.latency.toFixed(2)}s avg latency` : undefined;
+                          return (
+                            <div key={idx} className={`share-compare-card ${item.kind === "baseline" ? "is-primary" : ""}`}>
+                              <div className="share-compare-header">
+                                <span className="share-compare-title" title={item.label}>{item.label}</span>
+                                <span className="share-compare-value">{percent}</span>
+                              </div>
+                              <div className="share-compare-bar">
+                                <div className="share-compare-fill" style={{ width: `${item.width}%` }} />
+                              </div>
+                              <div className="share-compare-meta">
+                                {attempts && <span>{attempts}</span>}
+                                {latency && <span>{latency}</span>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     )}
 
                     {status && diffEntries.length > 0 && (
@@ -1762,6 +1892,8 @@ export default function Page() {
           font-weight: 500;
           color: rgba(248, 250, 252, 0.9);
           font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+          word-break: break-word;
+          overflow-wrap: anywhere;
         }
 
         .share-claim-text {
@@ -1835,9 +1967,13 @@ export default function Page() {
           border: 1px solid;
           font-size: 1.05rem;
           font-weight: 700;
-          display: inline-flex;
-          align-items: center;
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: center;
           gap: 8px;
+          text-align: center;
+          word-break: break-word;
+          overflow-wrap: anywhere;
         }
 
         .share-working {
@@ -1952,6 +2088,8 @@ export default function Page() {
         .share-summary-list li {
           padding-left: 18px;
           position: relative;
+          word-break: break-word;
+          overflow-wrap: anywhere;
         }
 
         .share-summary-list li::before {
@@ -1960,6 +2098,71 @@ export default function Page() {
           left: 0;
           top: 0;
           color: rgba(248, 250, 252, 0.7);
+        }
+
+        .share-compare-grid {
+          margin-top: 12px;
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 12px;
+        }
+
+        .share-compare-card {
+          padding: 14px 16px;
+          border-radius: 12px;
+          background: rgba(15, 23, 42, 0.55);
+          border: 1px solid rgba(248, 250, 252, 0.12);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .share-compare-card.is-primary {
+          border-color: rgba(96, 165, 250, 0.55);
+          box-shadow: 0 12px 24px rgba(59, 130, 246, 0.18);
+        }
+
+        .share-compare-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+        }
+
+        .share-compare-title {
+          font-weight: 600;
+          color: rgba(248, 250, 252, 0.9);
+          max-width: 70%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .share-compare-value {
+          font-weight: 700;
+          color: rgba(129, 140, 248, 0.95);
+        }
+
+        .share-compare-bar {
+          position: relative;
+          height: 10px;
+          border-radius: 999px;
+          background: rgba(148, 163, 184, 0.25);
+          overflow: hidden;
+        }
+
+        .share-compare-fill {
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background: linear-gradient(90deg, rgba(129, 140, 248, 0.9), rgba(56, 189, 248, 0.9));
+        }
+
+        .share-compare-meta {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          font-size: 0.78rem;
+          color: rgba(226, 232, 240, 0.78);
         }
 
         .diff-list li {
@@ -1976,6 +2179,8 @@ export default function Page() {
 
         .diff-value {
           color: rgba(230, 237, 243, 0.8);
+          word-break: break-word;
+          overflow-wrap: anywhere;
         }
 
         @keyframes pulse {

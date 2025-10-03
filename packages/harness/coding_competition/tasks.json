@@ -1,28 +1,158 @@
 [
   {
-    "id": "balanced_parentheses",
-    "prompt": "Write a Python function `is_balanced(expr: str) -> bool` that returns True when the input string contains balanced parentheses (), [] and {}. Ignore any other characters.",
+    "id": "bundle1_top_k_frequent_strings",
+    "prompt": "Bundle 1 \u00b7 Algorithmic Precision & Edge-Case Discipline\nTask A1 \u2014 Top-K Frequent Strings (strict ordering)\n\nImplement:\n\n    def top_k(items: list[str], k: int) -> list[str]:\n        # Return the k most frequent strings using frequency-desc then lexicographic-asc tie-breakers.\n\nRequirements:\n- Deterministic only; no randomness or printing.\n- Target time complexity O(n log n) or better; avoid quadratic scans.\n- Return only the list of strings.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.\n\nTest dataset examples the evaluator will use:\n- items = [\"b\",\"a\",\"b\",\"c\",\"b\",\"a\",\"d\",\"c\",\"c\",\"c\",\"e\",\"e\",\"e\",\"e\"], k=3 -> [\"c\",\"e\",\"b\"]\n- items = [\"aa\",\"ab\",\"aa\",\"ab\",\"aa\",\"ac\"], k=2 -> [\"aa\",\"ab\"]\n- items = [], k=5 -> []\n- items = [\"b\",\"a\",\"a\",\"b\"], k=2 -> [\"a\",\"b\"] (tie-break by lexicographic order)",
     "tests": [
-      {"input": "is_balanced('([{}])')", "expected": "True"},
-      {"input": "is_balanced('([)]')", "expected": "False"},
-      {"input": "is_balanced('function() { return [1, 2, 3]; }')", "expected": "True"}
+      {
+        "input": "top_k(['b','a','b','c','b','a','d','c','c','c','e','e','e','e'], 3)",
+        "expected": "['c', 'e', 'b']"
+      },
+      {
+        "input": "top_k(['aa','ab','aa','ab','aa','ac'], 2)",
+        "expected": "['aa', 'ab']"
+      },
+      {
+        "input": "top_k([], 5)",
+        "expected": "[]"
+      },
+      {
+        "input": "top_k(['b','a','a','b'], 2)",
+        "expected": "['a', 'b']"
+      }
     ]
   },
   {
-    "id": "merge_intervals",
-    "prompt": "Write a Python function `merge_intervals(intervals: list[list[int]]) -> list[list[int]]` that merges overlapping intervals and returns them sorted by start.",
+    "id": "bundle1_seeded_shuffle",
+    "prompt": "Bundle 1 \u00b7 Algorithmic Precision & Edge-Case Discipline\nTask A2 \u2014 Deterministic Shuffle (seeded Fisher\u2013Yates)\n\nImplement:\n\n    def shuffle_seeded(seq: list[int], seed: int) -> list[int]:\n        # Return a Fisher\u2013Yates shuffle of seq using random.Random(seed) without mutating the input.\n\nConstraints:\n- Use random.Random(seed).shuffle on a copy; never mutate the input list.\n- No other randomness sources or printing.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.\n\nEvaluator checks include:\n- shuffle_seeded(list(range(10)), 42) == [7, 3, 2, 8, 5, 6, 9, 4, 0, 1]\n- Input immutability is asserted.\n- Multiple seeds tested for deterministic results.",
     "tests": [
-      {"input": "merge_intervals([[1,3],[2,6],[8,10],[15,18]])", "expected": "[[1, 6], [8, 10], [15, 18]]"},
-      {"input": "merge_intervals([[1,4],[4,5]])", "expected": "[[1, 5]]"}
+      {
+        "script": "\noriginal = list(range(10))\nresult = shuffle_seeded(original, 42)\nassert result == [7, 3, 2, 8, 5, 6, 9, 4, 0, 1]\nassert original == list(range(10))\nsmall_input = list(range(5))\nout = shuffle_seeded(small_input, 7)\nassert out == [4, 0, 3, 1, 2]\nassert small_input == list(range(5))\n"
+      }
     ]
   },
   {
-    "id": "top_k_frequent",
-    "prompt": "Write a Python function `top_k_frequent(nums: list[int], k: int) -> list[int]` that returns the k most frequent integers sorted by frequency desc then value asc.",
+    "id": "bundle1_lru_ttl",
+    "prompt": "Bundle 1 \u00b7 Algorithmic Precision & Edge-Case Discipline\nTask A3 \u2014 LRU Cache with TTL (clock injection)\n\nDesign an LRU cache with TTL aware of an injected clock. Provide:\n\n    class LRU:\n        def __init__(self, capacity: int, ttl: int, now: callable):\n            # now() returns integer seconds.\n        def get(self, key): ...\n        def put(self, key, value): ...\n\nBehavior:\n- TTL is measured from the most recent put; reads do NOT extend TTL.\n- On get/put, purge any expired entries.\n- get returns None for missing or expired items.\n- put replaces existing values and resets age.\n- Capacity must never exceed the provided limit.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.\n\nThe evaluator uses a FakeClock (advancing deterministically) and exercises expiry, reuse, and eviction scenarios.",
     "tests": [
-      {"input": "top_k_frequent([1,1,1,2,2,3], 2)", "expected": "[1, 2]"},
-      {"input": "top_k_frequent([4,4,4,4], 1)", "expected": "[4]"},
-      {"input": "top_k_frequent([1,2,3,4], 2)", "expected": "[1, 2]"}
+      {
+        "script": "\nclass FakeClock:\n    def __init__(self):\n        self.t = 0\n    def now(self) -> int:\n        return self.t\n    def advance(self, dt: int) -> None:\n        self.t += dt\n\nclk = FakeClock()\ncache = LRU(capacity=2, ttl=5, now=clk.now)\ncache.put(1, 'A')\nclk.advance(3)\ncache.put(2, 'B')\nclk.advance(1)\nassert cache.get(1) == 'A'\nclk.advance(2)\nassert cache.get(2) == 'B'\ncache.put(3, 'C')\nclk.advance(3)\nassert cache.get(2) is None\nassert cache.get(3) == 'C'\nassert cache.get(1) is None\n\nclk = FakeClock()\ncache = LRU(capacity=2, ttl=4, now=clk.now)\ncache.put('x', 1)\ncache.put('y', 2)\nclk.advance(3)\nassert cache.get('x') == 1\ncache.put('x', 9)\nclk.advance(3)\nassert cache.get('x') is None\nclk.advance(1)\nassert cache.get('y') is None\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle1_path_normalizer",
+    "prompt": "Bundle 1 \u00b7 Algorithmic Precision & Edge-Case Discipline\nTask A4 \u2014 POSIX-like Path Normalizer (no os.path)\n\nImplement:\n\n    def normalize_path(p: str) -> str:\n        # Normalize POSIX-style paths, resolving '.', '..', collapsing slashes, and preserving roots.\n\nRules:\n- Do not use os.path, pathlib, or external libraries.\n- Preserve leading '/' if present; remove trailing '/' unless the path is '/'.\n- Resolve '.' and '..' without following symlinks.\n- Retain leading '..' segments for relative paths.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "input": "normalize_path('a/b/../c//./d/')",
+        "expected": "'a/c/d'"
+      },
+      {
+        "input": "normalize_path('/../a//b/./c')",
+        "expected": "'/a/b/c'"
+      },
+      {
+        "input": "normalize_path('././x')",
+        "expected": "'x'"
+      },
+      {
+        "input": "normalize_path('a/../../b')",
+        "expected": "'../b'"
+      },
+      {
+        "input": "normalize_path('/')",
+        "expected": "'/'"
+      }
+    ]
+  },
+  {
+    "id": "bundle2_csv_splitter_bugfix",
+    "prompt": "Bundle 2 \u00b7 Codebase Maintenance: Fix, Refactor, Extend\nTask B1 \u2014 CSV Splitter Bugfix (quoted fields)\n\nRepair the naive splitter to support minimal RFC4180 quoting:\n\n    def split_csv(line: str) -> list[str]: ...\n\nRequirements:\n- Handle double-quoted fields, escaped quotes (\"\" -> \"), and embedded commas/newlines inside quotes.\n- Trim surrounding whitespace outside quotes; preserve interior whitespace.\n- No external libraries.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.\n\nEvaluator inputs cover quoted commas, escaped quotes, whitespace trimming, and empty rows.",
+    "tests": [
+      {
+        "input": "split_csv('1,\"a,b\", \"c\"\"d\"')",
+        "expected": "['1', 'a,b', 'c\"d']"
+      },
+      {
+        "input": "split_csv(' \"x\" ,y , \"\" ')",
+        "expected": "['x', 'y', '']"
+      },
+      {
+        "input": "split_csv('')",
+        "expected": "['']"
+      }
+    ]
+  },
+  {
+    "id": "bundle2_table_formatter_refactor",
+    "prompt": "Bundle 2 \u00b7 Codebase Maintenance: Fix, Refactor, Extend\nTask B2 \u2014 Refactor to Named Helper APIs (AST-checked)\n\nMaintain the original table formatter but expose the helper surface:\n\n    def parse_markdown_table(text: str) -> list[list[str]]: ...\n    def align_columns(rows: list[list[str]]) -> list[int]: ...\n    def render_rows(rows: list[list[str]], widths: list[int]) -> str: ...\n    def render_table(rows: list[list[str]]) -> str: ...  # delegates to the helpers\n\nRequirements:\n- render_table must call the helper functions above.\n- Output must match the legacy implementation for arbitrary data.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "script": "\n                import ast\n                import inspect\n                import random\n                import tablefmt\n\n                def legacy_render_table(rows):\n                    widths = [0] * len(rows[0])\n                    for r in rows:\n                        for i, c in enumerate(r):\n                            widths[i] = max(widths[i], len(str(c)))\n                    out = []\n                    for r in rows:\n                        out.append(' | '.join(str(c).ljust(widths[i]) for i, c in enumerate(r)))\n                    return '\n'.join(out)\n\n                random.seed(1234)\n                rows = [[f\"r{r}_col{c}{'x' * random.randint(0, 2)}\" for c in range(3)] for r in range(4)]\n                assert tablefmt.render_table(rows) == legacy_render_table(rows)\n\n                helpers = ['parse_markdown_table', 'align_columns', 'render_rows']\n                render_src = inspect.getsource(tablefmt.render_table)\n                tree = ast.parse(render_src)\n                called = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}\n                for helper in helpers:\n                    assert hasattr(tablefmt, helper)\n                    assert helper in called\n\n                markdown = '| name | score |\n| --- | --- |\n| alice | 5 |\n| bob | 42 |\n'\n                expected_rows = [['name', 'score'], ['alice', '5'], ['bob', '42']]\n                assert tablefmt.parse_markdown_table(markdown) == expected_rows\n\n                widths = tablefmt.align_columns(rows)\n                expected_widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]\n                assert widths == expected_widths\n                assert tablefmt.render_rows(rows, widths) == legacy_render_table(rows)\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle2_strict_config_parser",
+    "prompt": "Bundle 2 \u00b7 Codebase Maintenance: Fix, Refactor, Extend\nTask B3 \u2014 Strict Input Validation & Errors\n\nImplement:\n\n    def parse_config(s: str) -> dict:\n        # Parse KEY=VALUE pairs enforcing uppercase keys and required values.\n\nValidation rules:\n- Ignore blank lines and comments beginning with '#'.\n- Keys must be ASCII uppercase letters or underscores only.\n- Values trimmed of whitespace must be non-empty.\n- Raise ValueError with the exact messages from the bundle brief.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "script": "\n                cfg = parse_config('FOO=bar\n# cmt\nBAZ =  9  ')\n                assert cfg == {'FOO': 'bar', 'BAZ': '9'}\n\n                try:\n                    parse_config('bad')\n                except ValueError as exc:\n                    assert str(exc) == 'invalid line: bad'\n                else:\n                    raise AssertionError('expected invalid line error')\n\n                try:\n                    parse_config('FOO=')\n                except ValueError as exc:\n                    assert str(exc) == 'empty value for key: FOO'\n                else:\n                    raise AssertionError('expected empty value error')\n\n                try:\n                    parse_config('foO=1')\n                except ValueError as exc:\n                    assert str(exc) == 'invalid key: foO'\n                else:\n                    raise AssertionError('expected invalid key error')\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle2_memoized_fibonacci",
+    "prompt": "Bundle 2 \u00b7 Codebase Maintenance: Fix, Refactor, Extend\nTask B4 \u2014 Memoized Fibonacci with Call-Counting\n\nImplement:\n\n    def fib(n: int, counter=None) -> int:\n        # Return nth Fibonacci (fib(0)=0, fib(1)=1). When counter provided, call counter.inc() once per distinct sub-problem.\n\nRequirements:\n- Use memoization (dict or functools.lru_cache).\n- No global state, no printing.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "input": "fib(10)",
+        "expected": "55"
+      },
+      {
+        "script": "\nclass Counter:\n    def __init__(self):\n        self.c = 0\n    def inc(self):\n        self.c += 1\n\nctr = Counter()\nassert fib(10, ctr) == 55\nassert ctr.c <= 11\n\nctr = Counter()\nassert fib(35, ctr) == 9227465\nassert ctr.c <= 36\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle3_sales_summary",
+    "prompt": "Bundle 3 \u00b7 Protocol/Contract Fidelity & Structured I/O\nTask C1 \u2014 JSON Summary (deep equality; cents rounding)\n\nImplement:\n\n    def summarize_sales(records: list[dict]) -> str:\n        # Aggregate totals and return a JSON string with totals and per-SKU stats.\n\nRequirements:\n- revenue_cents is round(qty * price * 100) per record aggregated per SKU.\n- Per-sku summary sorted ascending by sku.\n- Output must be json.dumps compatible.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "script": "\nimport json\n\nrecords = [\n    {'sku': 'A1', 'qty': 2, 'price': 3.5},\n    {'sku': 'A1', 'qty': 1, 'price': 3.5},\n    {'sku': 'B2', 'qty': 5, 'price': 1.2},\n]\nout = summarize_sales(records)\ndata = json.loads(out)\nassert data == {\n    'total_qty': 8,\n    'unique_skus': 2,\n    'revenue_cents': 1650,\n    'per_sku': [\n        {'sku': 'A1', 'qty': 3, 'revenue_cents': 1050},\n        {'sku': 'B2', 'qty': 5, 'revenue_cents': 600},\n    ],\n}\n\nround_records = [\n    {'sku': 'R1', 'qty': 1, 'price': 0.335},\n    {'sku': 'R1', 'qty': 2, 'price': 1.005},\n    {'sku': 'S2', 'qty': 3, 'price': 2.499},\n]\nrounded = json.loads(summarize_sales(round_records))\nassert rounded['per_sku'] == [\n    {'sku': 'R1', 'qty': 3, 'revenue_cents': 237},\n    {'sku': 'S2', 'qty': 3, 'revenue_cents': 750},\n]\nassert rounded['revenue_cents'] == 987\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle3_wsgi_hash_app",
+    "prompt": "Bundle 3 \u00b7 Protocol/Contract Fidelity & Structured I/O\nTask C2 \u2014 WSGI App: Exact Status/Headers/Body\n\nImplement a WSGI application:\n\n    def app(environ, start_response): ...\n\nBehavior:\n- GET /hash?text=... -> 200 OK with body {\"sha256\":\"<hex>\"} using json.dumps(..., separators=(',',':')).\n- Missing text query -> 400 Bad Request with {\"error\":\"missing text\"}.\n- Any other method -> 405 Method Not Allowed with {\"error\":\"method not allowed\"}.\n- Response header: Content-Type: application/json; charset=utf-8.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "script": "\nimport hashlib\nimport io\n\ndef run_request(method, path, query):\n    captured = {}\n    environ = {\n        'REQUEST_METHOD': method,\n        'PATH_INFO': path,\n        'QUERY_STRING': query,\n        'wsgi.input': io.BytesIO(b''),\n    }\n\n    def start_response(status, headers):\n        captured['status'] = status\n        captured['headers'] = headers\n\n    body = b''.join(app(environ, start_response))\n    captured['body'] = body\n    return captured\n\nok = run_request('GET', '/hash', 'text=hello')\nexpected_hash = hashlib.sha256(b'hello').hexdigest()\nassert ok['status'] == '200 OK'\nassert ('Content-Type', 'application/json; charset=utf-8') in ok['headers']\nassert ok['body'] == f'{{\"sha256\":\"{expected_hash}\"}}'.encode()\n\nmissing = run_request('GET', '/hash', '')\nassert missing['status'] == '400 Bad Request'\nassert missing['body'] == b'{\"error\":\"missing text\"}'\n\nmethod = run_request('POST', '/hash', 'text=test')\nassert method['status'] == '405 Method Not Allowed'\nassert method['body'] == b'{\"error\":\"method not allowed\"}'\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle3_sql_builder",
+    "prompt": "Bundle 3 \u00b7 Protocol/Contract Fidelity & Structured I/O\nTask C3 \u2014 SQL Builder (string + params, deterministic shape)\n\nImplement:\n\n    def build_user_query(filters: dict) -> tuple[str, list]:\n        # Return (sql, params) following the clause order and defaults described in the bundle brief.\n\nRules:\n- SELECT id, name, age FROM users WHERE 1=1 ...\n- Optional clauses: age >= ?, is_active = ?, country IN (?, ...).\n- sort_by in {'name','age'} default 'name'; sort_dir in {'asc','desc'} default 'asc'.\n- limit between 1 and 100 inclusive; default 50.\n- Use '?' placeholders and return params list matching clause order.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "script": "\nsql, params = build_user_query({\n    'min_age': 30,\n    'is_active': True,\n    'country': ['US', 'CA'],\n    'sort_by': 'name',\n    'sort_dir': 'asc',\n    'limit': 10,\n})\nassert sql == 'SELECT id, name, age FROM users WHERE 1=1 AND age >= ? AND is_active = ? AND country IN (?, ?) ORDER BY NAME ASC LIMIT ?'\nassert params == [30, 1, 'US', 'CA', 10]\n\nsql2, params2 = build_user_query({'country': ['NL'], 'sort_dir': 'desc'})\nassert sql2 == 'SELECT id, name, age FROM users WHERE 1=1 AND country IN (?) ORDER BY NAME DESC LIMIT ?'\nassert params2 == ['NL', 50]\n\nsql3, params3 = build_user_query({})\nassert sql3 == 'SELECT id, name, age FROM users WHERE 1=1 ORDER BY NAME ASC LIMIT ?'\nassert params3 == [50]\n\ntry:\n    build_user_query({'limit': 0})\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError('limit lower bound not enforced')\n\ntry:\n    build_user_query({'limit': 101})\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError('limit upper bound not enforced')\n"
+      }
+    ]
+  },
+  {
+    "id": "bundle3_ndjson_emitter",
+    "prompt": "Bundle 3 \u00b7 Protocol/Contract Fidelity & Structured I/O\nTask C4 \u2014 NDJSON Emitter (escape & newline discipline)\n\nImplement:\n\n    def to_ndjson(objs: list[dict]) -> str:\n        # Return newline-delimited JSON with compact separators and no trailing newline.\n\nRequirements:\n- Each line must be valid JSON serialization with separators=(',',':').\n- Preserve order as emitted by json.dumps in CPython 3.11.\n- Return ONLY the requested file in a single ```python code block with the exact filename on the first comment line (e.g., # file.py) and no explanation.",
+    "tests": [
+      {
+        "input": "to_ndjson([{'id': 1, 'msg': 'hi'}, {'id': 2, 'msg': 'line\\nbreak \"quotes\"'}])",
+        "expected": "{\"id\":1,\"msg\":\"hi\"}\n{\"id\":2,\"msg\":\"line\\nbreak \\\"quotes\\\"\"}"
+      },
+      {
+        "input": "to_ndjson([])",
+        "expected": "''"
+      }
     ]
   }
 ]

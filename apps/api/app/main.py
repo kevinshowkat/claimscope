@@ -1,7 +1,10 @@
 import os
 import re
+import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -57,6 +60,314 @@ VISION_MARKERS = (
     "mmbench",
     "perception",
 )
+
+
+def _normalize_model_name(name: str) -> str:
+    return re.sub(r"\s+", " ", name.strip()).lower()
+
+
+MODEL_NAME_PATTERNS = [
+    r"claude opus\s*[0-9.]*",
+    r"claude sonnet\s*[0-9.]*",
+    r"claude haiku\s*[0-9.]*",
+    r"claude\s*[0-9.]*",
+    r"gpt-[0-9a-zA-Z.\-]+",
+    r"gemini\s*[0-9.]*\s*(?:pro|flash|ultra)?",
+    r"llama\s*[0-9.]*\s*(?:vision)?\s*(?:[0-9]{1,2}b|[0-9]{1,2}\.?[0-9]*b)?",
+]
+
+
+def _extract_model_mentions(text: str) -> List[str]:
+    mentions: List[str] = []
+    for pattern in MODEL_NAME_PATTERNS:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = re.sub(r"\s+", " ", match.group(0).strip())
+            if value and value not in mentions:
+                mentions.append(value)
+    return mentions
+
+
+_MODEL_REGISTRY: List[Dict[str, Any]] = [
+    {
+        "display": "GPT-4o",
+        "provider": "openai",
+        "model": os.getenv("CLAIMSCOPE_MODEL_GPT4O", "gpt-4o"),
+        "env": "OPENAI_API_KEY",
+        "aliases": ["gpt-4o", "gpt 4o", "gpt4o"],
+        "variants": ["gpt-4o"],
+        "default_compare": True,
+    },
+    {
+        "display": "GPT-4o mini",
+        "provider": "openai",
+        "model": os.getenv("CLAIMSCOPE_MODEL_GPT4O_MINI", "gpt-4o-mini"),
+        "env": "OPENAI_API_KEY",
+        "aliases": ["gpt-4o mini", "gpt 4o mini", "gpt4o mini"],
+        "variants": ["gpt-4o-mini"],
+    },
+    {
+        "display": "Gemini 1.5 Pro",
+        "provider": "gemini",
+        "model": os.getenv("CLAIMSCOPE_MODEL_GEMINI_PRO", "gemini-1.5-pro"),
+        "env": "GOOGLE_GEMINI_API_KEY",
+        "aliases": ["gemini 1.5 pro", "gemini pro", "gemini 1.5"],
+        "variants": ["gemini-1.5-pro", "gemini-2.5-pro"],
+        "default_compare": True,
+    },
+    {
+        "display": "Claude Sonnet 4.5",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_SONNET45", "claude-sonnet-4-5-20250929"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude sonnet 4.5", "sonnet 4.5"],
+        "variants": ["claude-sonnet-4-5-20250929", "claude-sonnet-4-5-latest"],
+        "default_compare": True,
+    },
+    {
+        "display": "Claude Sonnet 4",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_SONNET4", "claude-sonnet-4-20250514"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude sonnet 4", "sonnet 4", "claude sonnet"],
+        "variants": ["claude-sonnet-4-20250514", "claude-sonnet-4-latest"],
+    },
+    {
+        "display": "Claude Sonnet 3.7",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_SONNET37", "claude-3-7-sonnet-20250219"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude sonnet 3.7", "sonnet 3.7"],
+        "variants": ["claude-3-7-sonnet-20250219", "claude-3-7-sonnet-latest"],
+    },
+    {
+        "display": "Claude Opus 4",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_OPUS4", "claude-opus-4-20250514"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude opus 4", "opus 4", "claude opus"],
+        "variants": ["claude-opus-4-20250514", "claude-opus-4-latest"],
+    },
+    {
+        "display": "Claude Opus 4.1",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_OPUS41", "claude-opus-4-1-20250805"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude opus 4.1", "opus 4.1"],
+        "variants": ["claude-opus-4-1-20250805"],
+    },
+    {
+        "display": "Claude Haiku 3.5",
+        "provider": "anthropic",
+        "model": os.getenv("CLAIMSCOPE_MODEL_CLAUDE_HAIKU35", "claude-3-5-haiku-20241022"),
+        "env": "ANTHROPIC_API_KEY",
+        "aliases": ["claude haiku 3.5", "haiku 3.5", "claude haiku"],
+        "variants": ["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+    },
+]
+
+_PROVIDER_MODEL_CACHE: Dict[str, Set[str]] = {}
+_PROVIDER_MODEL_CACHE_TS: Dict[str, float] = {}
+_PROVIDER_CACHE_TTL_S = 300.0
+
+
+def _provider_discovery_enabled() -> bool:
+    value = os.getenv("CLAIMSCOPE_ENABLE_PROVIDER_DISCOVERY", "")
+    return value.lower() in {"1", "true", "yes"}
+
+_MODEL_ALIAS_LOOKUP: Dict[str, Dict[str, Any]] = {}
+for entry in _MODEL_REGISTRY:
+    aliases = entry.get("aliases") or []
+    aliases.append(entry["display"])
+    normalized_aliases = {_normalize_model_name(alias) for alias in aliases}
+    entry["_aliases"] = normalized_aliases
+    for alias in normalized_aliases:
+        _MODEL_ALIAS_LOOKUP[alias] = entry
+
+
+def _lookup_model_entry(name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not name:
+        return None
+    return _MODEL_ALIAS_LOOKUP.get(_normalize_model_name(name))
+
+
+def _fetch_provider_models(provider: str) -> Optional[Set[str]]:
+    try:
+        if provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                return None
+            resp = requests.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                return None
+            payload = resp.json()
+            data = payload.get("data") or payload.get("models") or []
+            return {
+                item.get("id") or item.get("name")
+                for item in data
+                if isinstance(item, dict) and (item.get("id") or item.get("name"))
+            }
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return None
+            resp = requests.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                return None
+            payload = resp.json()
+            data = payload.get("data") or []
+            return {
+                item.get("id")
+                for item in data
+                if isinstance(item, dict) and item.get("id")
+            }
+        if provider == "gemini":
+            api_key = os.getenv("GOOGLE_GEMINI_API_KEY")
+            if not api_key:
+                return None
+            resp = requests.get(
+                "https://generativelanguage.googleapis.com/v1/models",
+                params={"key": api_key},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                return None
+            payload = resp.json()
+            data = payload.get("models") or []
+            return {
+                item.get("name") or item.get("displayName")
+                for item in data
+                if isinstance(item, dict) and (item.get("name") or item.get("displayName"))
+            }
+    except requests.RequestException:
+        return None
+    return None
+
+
+def _get_provider_models(provider: str) -> Optional[Set[str]]:
+    if not _provider_discovery_enabled():
+        return None
+    if not provider:
+        return None
+    now = time.time()
+    cached = _PROVIDER_MODEL_CACHE.get(provider)
+    ts = _PROVIDER_MODEL_CACHE_TS.get(provider, 0.0)
+    if cached is not None and now - ts < _PROVIDER_CACHE_TTL_S:
+        return cached
+    models = _fetch_provider_models(provider)
+    if models:
+        _PROVIDER_MODEL_CACHE[provider] = models
+        _PROVIDER_MODEL_CACHE_TS[provider] = now
+        return models
+    _PROVIDER_MODEL_CACHE_TS[provider] = now
+    return cached
+
+
+def _pick_model_identifier(entry: Dict[str, Any]) -> Optional[str]:
+    provider = entry.get("provider")
+    configured = entry.get("model")
+    variants = entry.get("variants") or []
+    candidates: List[str] = []
+    for candidate in [configured, *variants]:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    if not candidates:
+        return configured
+    available = _get_provider_models(provider)
+    if available is None:
+        return candidates[0]
+    # Allow matching against provider-prefixed names (e.g., models/{id})
+    normalized_available = {item for item in available}
+    short_available = {item.split("/", 1)[-1] for item in available}
+    for candidate in candidates:
+        if candidate in normalized_available:
+            return candidate
+        prefixed = f"models/{candidate}"
+        if prefixed in normalized_available:
+            return prefixed
+        if candidate.startswith("models/"):
+            short = candidate.split("/", 1)[-1]
+            if short in short_available:
+                return candidate
+        if candidate in short_available:
+            # Return the available entry with the provider prefix if present
+            for entry_id in normalized_available:
+                if entry_id.split("/", 1)[-1] == candidate:
+                    return entry_id
+    return candidates[0]
+
+
+def _resolve_comparator_models(
+    primary: Optional[str],
+    requested: List[str],
+    *,
+    include_defaults: bool = True,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    primary_entry = _lookup_model_entry(primary)
+    primary_key = None
+    if primary_entry:
+        primary_model_name = _pick_model_identifier(primary_entry) or primary_entry["model"]
+        primary_key = (primary_entry["provider"], primary_model_name)
+
+    resolved_names: List[str] = []
+    resolved_configs: List[Dict[str, Any]] = []
+    seen_keys = set()
+    seen_names = set()
+
+    def _add_display(name: str) -> None:
+        if not name:
+            return
+        norm = _normalize_model_name(name)
+        if norm in seen_names:
+            return
+        seen_names.add(norm)
+        resolved_names.append(name)
+
+    def _maybe_add(entry: Optional[Dict[str, Any]], *, fallback: Optional[str] = None) -> None:
+        if entry:
+            chosen_model = _pick_model_identifier(entry) or entry.get("model")
+            key = (entry["provider"], chosen_model)
+            if primary_key and key == primary_key:
+                return
+            display_name = entry.get("display") or fallback
+            if display_name:
+                _add_display(display_name)
+            env_var = entry.get("env")
+            has_credentials = not env_var or os.getenv(env_var)
+            if not has_credentials:
+                return
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            config: Dict[str, Any] = {"provider": entry["provider"], "name": chosen_model}
+            api_key_ref = entry.get("api_key_ref")
+            if api_key_ref:
+                config["api_key_ref"] = api_key_ref
+            resolved_configs.append(config)
+        elif fallback:
+            _add_display(fallback)
+
+    for name in requested:
+        entry = _lookup_model_entry(name)
+        if entry:
+            _maybe_add(entry)
+        else:
+            _maybe_add(None, fallback=name)
+
+    if include_defaults:
+        for entry in _MODEL_REGISTRY:
+            if not entry.get("default_compare"):
+                continue
+            _maybe_add(entry)
+
+    return resolved_names, resolved_configs
 
 
 def _contains_comparative_language(text: str) -> bool:
@@ -178,28 +489,15 @@ def _extract_capabilities(text: str) -> List[str]:
 
 
 def _detect_primary_model(text: str) -> Optional[str]:
-    patterns = [
-        r"claude opus\s*[0-9.]*",
-        r"claude sonnet\s*[0-9.]*",
-        r"claude haiku\s*[0-9.]*",
-        r"gpt-[^\s,.;]+",
-        r"llama\s*[0-9.]*\s*(?:vision)?\s*(?:[0-9]{1,2}b|[0-9]{1,2}\.?[0-9]*b)?",
-        r"gemini\s*[0-9.]*",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            value = match.group(0).strip()
-            # Normalise spacing
-            value = re.sub(r"\s+", " ", value)
-            return value
-    return None
+    mentions = _extract_model_mentions(text)
+    return mentions[0] if mentions else None
 
 
 def _build_claim_settings(
     *,
     comparative: bool,
     comparators: List[str],
+    comparator_configs: Optional[List[Dict[str, Any]]],
     requires_multimodal: bool,
 ) -> Dict[str, Any]:
     settings: Dict[str, Any] = {}
@@ -207,6 +505,8 @@ def _build_claim_settings(
         settings["requires_comparison"] = True
         if comparators:
             settings["comparand_models"] = comparators
+        if comparator_configs:
+            settings["comparative_models"] = comparator_configs
     if requires_multimodal:
         settings["requires_multimodal_harness"] = True
     return settings
@@ -249,22 +549,49 @@ def submit_claim(body: SubmitClaimRequest):
         )
 
     primary_model = _detect_primary_model(body.raw_text or "")
+    model_mentions = _extract_model_mentions(body.raw_text or "")
+    if primary_model is None and model_mentions:
+        primary_model = model_mentions[0]
 
     comparative = _contains_comparative_language(body.raw_text or "")
     comparators = _extract_comparators(body.raw_text or "") if comparative else []
     if primary_model:
-        comparators = [c for c in comparators if c.lower() != primary_model.lower()]
+        comparators = [c for c in comparators if _normalize_model_name(c) != _normalize_model_name(primary_model)]
+
+    if comparative:
+        for mention in model_mentions:
+            if primary_model and _normalize_model_name(mention) == _normalize_model_name(primary_model):
+                continue
+            if mention not in comparators:
+                comparators.append(mention)
+
+    resolved_comparators, comparator_configs = _resolve_comparator_models(
+        primary_model,
+        comparators,
+        include_defaults=comparative and not comparators,
+    )
+
+    if comparative:
+        comparators = resolved_comparators
+    else:
+        comparators = []
+        comparator_configs = []
 
     requires_multimodal = any(marker in raw for marker in VISION_MARKERS)
 
     settings = _build_claim_settings(
         comparative=comparative,
         comparators=comparators,
+        comparator_configs=comparator_configs,
         requires_multimodal=requires_multimodal,
     )
 
+    comparative_suite = None
+    if comparative and ("coding" in raw or "coder" in raw or "code" in raw):
+        comparative_suite = "coding_competition"
+
     if "humaneval" in raw or "coding" in raw or "best coding" in raw:
-        if "swe-bench" not in raw and "swebench" not in raw and "aider" not in raw:
+        if comparative_suite is None and "swe-bench" not in raw and "swebench" not in raw and "aider" not in raw:
             add("coding", "HumanEval", "pass@1", 0.78, 0.85, settings=settings, model_hint=primary_model)
     if "cagent" in raw or "agents" in raw or "complex agents" in raw:
         add("agents", "cAgent-12", "success@1", 0.67, 0.8, settings=settings, model_hint=primary_model)
@@ -328,17 +655,6 @@ def submit_claim(body: SubmitClaimRequest):
             settings={**settings, **efficiency_settings},
             model_hint=primary_model,
         )
-
-    comparative_suite = None
-    comparative_keywords = (
-        "performs better",
-        "outperforms",
-        "beats",
-        "wins",
-        "better than",
-    )
-    if comparative and any(keyword in raw for keyword in comparative_keywords) and "coding" in raw:
-        comparative_suite = "coding_competition"
 
     def with_suite(base_settings: Dict[str, Any]) -> Dict[str, Any]:
         if not comparative_suite:
@@ -481,6 +797,7 @@ def get_run(run_id: str):
             variance=None,
             trace_id=row.get("trace_id"),
             validation_count=row.get("validation_count"),
+            status_label=row.get("status_label"),
         )
 
 @app.get("/claims/{claim_id}", response_model=ClaimWithRuns)

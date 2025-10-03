@@ -11,6 +11,7 @@ export type RunStatus = {
   ci?: { lower: number; upper: number; method: string } | null;
   artifacts?: { name: string; url: string }[];
   validation_count?: number;
+  status_label?: "Replicated" | "Setting Drift" | "Underspecified" | "Not Reproduced";
 };
 
 export type ClaimSummary = {

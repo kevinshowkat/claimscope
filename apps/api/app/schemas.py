@@ -66,6 +66,7 @@ class RunStatusResponse(BaseModel):
     variance: Optional[Dict[str, Any]] = None
     trace_id: Optional[str] = None
     validation_count: Optional[int] = None
+    status_label: Optional[Status] = None
 
 class RunSummary(BaseModel):
     run_id: str
