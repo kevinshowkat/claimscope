@@ -463,6 +463,18 @@ def process_one(run_id: str, claim_id: str) -> None:
             return
 
         if domain == "coding" and settings.get("comparative_suite") == "coding_competition":
+            primary_provider = (model_cfg.get("provider") or "").lower()
+            if primary_provider == "gemini":
+                _record_failure(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="unsupported_model",
+                    message="Gemini models are temporarily disabled for the coding competition harness.",
+                    status_label="Failed",
+                )
+                return
+
             comp_cfgs = settings.get("telemetry", {}).get("comparators") if isinstance(settings.get("telemetry"), dict) else settings.get("comparative_models")
             if isinstance(comp_cfgs, dict):
                 comp_cfgs = [comp_cfgs]
@@ -488,6 +500,38 @@ def process_one(run_id: str, claim_id: str) -> None:
                     errors={"reason": "missing_comparators"},
                 )
                 return
+
+            filtered_cfgs = []
+            for cfg in comp_cfgs:
+                provider = (cfg.get("provider") or "").lower()
+                if provider == "gemini":
+                    continue
+                filtered_cfgs.append(cfg)
+
+            if not filtered_cfgs:
+                _mark_underspecified(
+                    conn,
+                    run_id,
+                    trace_id,
+                    reason="unsupported_comparators",
+                    message="Gemini comparators are temporarily disabled for the coding competition harness.",
+                    details=_comparison_details(),
+                )
+                record_trace(
+                    conn,
+                    run_id,
+                    harness_cmd="guard::coding_competition_disabled_gemini",
+                    dataset_id="coding-competition",
+                    params={"domain": domain, "task": task, "metric": metric},
+                    seeds={},
+                    tokens_prompt=0,
+                    tokens_output=0,
+                    cost_usd=0.0,
+                    errors={"reason": "gemini_disabled"},
+                )
+                return
+
+            comp_cfgs = filtered_cfgs
             temperature = float(settings.get("temperature") or 0.0)
             progress_cache: Dict[str, Any] = {}
             last_progress_at = 0.0
