@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from anthropic import Anthropic
 
@@ -184,13 +184,20 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
         try:
             response = client.generate_content(prompt, generation_config=generation_config)
         except Exception as exc:  # pragma: no cover
-            # Retry with discovery-backed IDs where available
-            if "not found" in str(exc).lower():
+            error_text = str(exc).lower()
+            if "not found" in error_text or "unsupported" in error_text:
                 fallback_names = []
                 if not model_name.endswith("-latest"):
                     fallback_names.append(f"{model_name}-latest")
-                fallback_names.append("models/gemini-2.5-pro")
-                fallback_names.append("models/gemini-2.0-pro-exp")
+                fallback_names.extend(
+                    [
+                        "models/gemini-2.5-pro",
+                        "models/gemini-2.0-pro-exp",
+                        "models/gemini-2.0-pro",
+                        "models/gemini-1.5-pro-latest",
+                    ]
+                )
+                discovered = None
                 for fallback in fallback_names:
                     try:
                         client, model_name = _build_model(fallback)
@@ -199,7 +206,19 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
                     except Exception:
                         continue
                 else:
-                    raise
+                    discovered = _discover_gemini_model(
+                        [
+                            "gemini-2.5-pro-latest",
+                            "gemini-2.5-pro",
+                            "gemini-2.0-pro-exp",
+                            "gemini-2.0-pro",
+                            "gemini-1.5-pro-latest",
+                        ]
+                    )
+                    if not discovered:
+                        raise
+                    client, model_name = _build_model(discovered)
+                    response = client.generate_content(prompt, generation_config=generation_config)
             else:
                 raise
         latency = time.time() - t0
@@ -229,7 +248,8 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
         if isinstance(usage, dict):
             input_tokens = int(usage.get("prompt_token_count", 0))
             output_tokens = int(usage.get("candidates_token_count", 0))
-        return ModelInvocation(name, "gemini", text or "", input_tokens, output_tokens, latency)
+        reported = model_name.split("/")[-1] if model_name else name
+        return ModelInvocation(reported, "gemini", text or "", input_tokens, output_tokens, latency)
 
     raise CodingBenchError(f"Unsupported provider for coding bench: {provider}")
 
@@ -516,3 +536,38 @@ def run_coding_competition(
         "comparators": comparator_outputs,
         "tasks": per_task,
     }
+_GEMINI_DISCOVERY_CACHE: Dict[str, str] = {}
+_GEMINI_DISCOVERY_TS = 0.0
+_GEMINI_DISCOVERY_TTL = 300.0  # seconds
+
+
+def _discover_gemini_model(preferred: Sequence[str]) -> Optional[str]:
+    if genai is None:
+        return None
+    global _GEMINI_DISCOVERY_CACHE, _GEMINI_DISCOVERY_TS
+    now = time.time()
+    if not _GEMINI_DISCOVERY_CACHE or now - _GEMINI_DISCOVERY_TS > _GEMINI_DISCOVERY_TTL:
+        try:
+            models = list(genai.list_models())
+        except Exception:  # pragma: no cover - discovery failure is acceptable
+            return None
+        cache: Dict[str, str] = {}
+        for model in models:
+            name = getattr(model, "name", None)
+            if not name:
+                continue
+            methods = getattr(model, "supported_generation_methods", []) or []
+            if "generateContent" not in methods:
+                continue
+            short = name.split("/")[-1]
+            cache[short] = name
+        _GEMINI_DISCOVERY_CACHE = cache
+        _GEMINI_DISCOVERY_TS = now
+    for candidate in preferred:
+        normalized = candidate.split("/")[-1]
+        if normalized in _GEMINI_DISCOVERY_CACHE:
+            return _GEMINI_DISCOVERY_CACHE[normalized]
+    if _GEMINI_DISCOVERY_CACHE:
+        # Return the most "advanced" looking model by sorting descending lexicographically
+        return sorted(_GEMINI_DISCOVERY_CACHE.values(), reverse=True)[0]
+    return None
