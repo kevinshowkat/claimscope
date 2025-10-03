@@ -20,6 +20,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from anthropic import Anthropic
 
 try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover - optional dependency
+    genai = None  # type: ignore
+
+try:
     from openai import OpenAI
 except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore
@@ -99,6 +104,33 @@ def _call_openai(model: str, prompt: str, api_key: str, *, temperature: float, m
     )
 
 
+def _call_gemini(model: str, prompt: str, api_key: str, *, temperature: float, max_tokens: int) -> TelemetryResult:
+    if genai is None:
+        raise TokenTelemetryError("google-generativeai package not installed; cannot call Gemini provider")
+    genai.configure(api_key=api_key)
+    client = genai.GenerativeModel(model_name=model)
+    generation_config = {"temperature": temperature, "max_output_tokens": max_tokens}
+    t0 = time.time()
+    response = client.generate_content(prompt, generation_config=generation_config)
+    latency = time.time() - t0
+    usage = getattr(response, "usage_metadata", None)
+    if isinstance(usage, dict):
+        input_tokens = int(usage.get("prompt_token_count", 0))
+        output_tokens = int(usage.get("candidates_token_count", 0))
+        total_tokens = int(usage.get("total_token_count", input_tokens + output_tokens))
+    else:
+        input_tokens = output_tokens = 0
+        total_tokens = 0
+    return TelemetryResult(
+        model=model,
+        provider="gemini",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        latency_s=latency,
+    )
+
+
 def _call_model(config: Dict[str, Any], prompt: str, *, temperature: float, max_tokens: int) -> TelemetryResult:
     provider = (config.get("provider") or "anthropic").lower()
     name = config.get("name")
@@ -115,6 +147,11 @@ def _call_model(config: Dict[str, Any], prompt: str, *, temperature: float, max_
         if not api_key:
             raise TokenTelemetryError("OPENAI_API_KEY not configured for telemetry run")
         return _call_openai(name, prompt, api_key, temperature=temperature, max_tokens=max_tokens)
+    if provider in {"google", "gemini", "google_gemini"}:
+        api_key = _resolve_api_key(api_key_ref, "GOOGLE_GEMINI_API_KEY")
+        if not api_key:
+            raise TokenTelemetryError("GOOGLE_GEMINI_API_KEY not configured for telemetry run")
+        return _call_gemini(name, prompt, api_key, temperature=temperature, max_tokens=max_tokens)
     raise TokenTelemetryError(f"Unsupported provider for telemetry: {provider}")
 
 
