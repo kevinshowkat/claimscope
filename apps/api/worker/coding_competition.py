@@ -32,6 +32,10 @@ except ImportError:  # pragma: no cover
 
 from .logging_utils import get_logger
 
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("GOOGLE_CLOUD_DISABLE_ALTS", "1")
+
 logger = get_logger("coding_competition")
 
 _DEFAULT_TEST_TIMEOUT_S = max(5.0, float(os.getenv("CODING_COMPETITION_TEST_TIMEOUT", "12")))
