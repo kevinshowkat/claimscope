@@ -1,0 +1,7 @@
+version: claimscope.swe.v1
+dataset: princeton-nlp/SWE-bench_Lite
+split: test
+predictions: predictions.claimscope.v1.jsonl
+metadata:
+  title: Example Claimscope Bundle
+  description: Minimal example predictions for documentation and tests.
