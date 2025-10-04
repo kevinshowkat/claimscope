@@ -2,6 +2,7 @@ import json
 import os
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -254,6 +255,20 @@ def process_one(run_id: str, claim_id: str) -> None:
             if comparators:
                 details["expected_comparators"] = comparators
             return details
+
+        def _summarise_failure(stderr: str) -> str:
+            if not stderr:
+                return "unknown"
+            lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+            if not lines:
+                return "unknown"
+            candidate = lines[-1]
+            if candidate.lower().startswith('file "') and len(lines) > 1:
+                candidate = lines[-2]
+            if candidate.lower().startswith("traceback") and len(lines) > 1:
+                candidate = lines[-1]
+            reason = candidate.split(":", 1)[0]
+            return reason or candidate
 
         def _guard_cost(expected_cost: float) -> bool:
             if expected_cost <= 0:
@@ -508,6 +523,14 @@ def process_one(run_id: str, claim_id: str) -> None:
                     continue
                 filtered_cfgs.append(cfg)
 
+            primary_api_key_ref = model_cfg.get("api_key_ref")
+            for cfg in filtered_cfgs:
+                provider = (cfg.get("provider") or "").lower()
+                api_key_ref = cfg.get("api_key_ref")
+                if provider == primary_provider and primary_api_key_ref:
+                    if not api_key_ref or not os.getenv(api_key_ref):
+                        cfg["api_key_ref"] = primary_api_key_ref
+
             if not filtered_cfgs:
                 _mark_underspecified(
                     conn,
@@ -575,6 +598,7 @@ def process_one(run_id: str, claim_id: str) -> None:
 
             baseline = results.get("baseline", {})
             comparators_info = results.get("comparators", [])
+            tasks_info = results.get("tasks", [])
             status_label = "Replicated"
             diff_entries: List[Dict[str, Any]] = []
             diff_entries.append(
@@ -622,6 +646,90 @@ def process_one(run_id: str, claim_id: str) -> None:
                             "message": "Baseline does not exceed comparator pass rates.",
                             "comparators": underperformers,
                             **_comparison_details(),
+                        }
+                    )
+
+            if isinstance(tasks_info, list) and tasks_info:
+                per_task: List[Dict[str, Any]] = []
+                baseline_only_fail: List[str] = []
+                everyone_fail: List[str] = []
+                baseline_only_pass: List[str] = []
+                baseline_failure_types: Counter[str] = Counter()
+                comparator_failure_types: Counter[str] = Counter()
+
+                for item in tasks_info:
+                    task_id = item.get("task_id") or "unknown"
+                    primary = item.get("primary") or {}
+                    comps = item.get("comparators") or []
+                    primary_success = bool(primary.get("success"))
+                    comparator_successes = [c for c in comps if c and c.get("success")]
+                    comparator_pass = bool(comparator_successes)
+
+                    if not primary_success and comparator_successes:
+                        baseline_only_fail.append(task_id)
+                    elif not primary_success and not comparator_pass:
+                        everyone_fail.append(task_id)
+                    elif primary_success and not comparator_pass:
+                        baseline_only_pass.append(task_id)
+
+                    if not primary_success:
+                        err = primary.get("stderr")
+                        if isinstance(err, str) and err:
+                            baseline_failure_types[_summarise_failure(err)] += 1
+
+                    for comp in comps:
+                        if not isinstance(comp, dict) or comp.get("success"):
+                            continue
+                        err = comp.get("stderr")
+                        if isinstance(err, str) and err:
+                            comparator_failure_types[_summarise_failure(err)] += 1
+
+                    per_task.append(
+                        {
+                            "task": task_id,
+                            "baseline": {
+                                "model": primary.get("model"),
+                                "success": primary_success,
+                                "stderr": primary.get("stderr"),
+                            },
+                            "comparators": [
+                                {
+                                    "model": comp.get("model"),
+                                    "success": bool(comp.get("success")),
+                                    "stderr": comp.get("stderr"),
+                                }
+                                for comp in comps
+                                if isinstance(comp, dict)
+                            ],
+                        }
+                    )
+
+                diff_entries.append(
+                    {
+                        "reason": "task_breakdown",
+                        "message": "Task-level outcomes",
+                        "tasks": per_task,
+                        "insights": {
+                            "baseline_failed_tasks": baseline_only_fail,
+                            "all_models_failed_tasks": everyone_fail,
+                            "baseline_only_pass_tasks": baseline_only_pass,
+                        },
+                    }
+                )
+
+                if baseline_failure_types or comparator_failure_types:
+                    diff_entries.append(
+                        {
+                            "reason": "failure_summary",
+                            "message": "Aggregated failure reasons",
+                            "baseline": [
+                                {"reason": reason, "count": count}
+                                for reason, count in baseline_failure_types.most_common()
+                            ],
+                            "comparators": [
+                                {"reason": reason, "count": count}
+                                for reason, count in comparator_failure_types.most_common()
+                            ],
                         }
                     )
 

@@ -134,6 +134,22 @@ type ShareTheme = {
   caption: string;
 };
 
+type TaskBreakdownInfo = {
+  tasks: Array<{
+    id: string;
+    baseline: { model?: string; success?: boolean; stderr?: string };
+    comparators: Array<{ model?: string; success?: boolean; stderr?: string }>;
+  }>;
+  insights: Record<string, unknown>;
+};
+
+type FailureReasonEntry = { reason: string; count: number };
+
+type FailureSummaryInfo = {
+  baseline: FailureReasonEntry[];
+  comparators: FailureReasonEntry[];
+};
+
 const SHARE_THEME: Record<Verdict | "queued" | "running" | "idle", ShareTheme> = {
   idle: {
     background: "#111827",
@@ -657,7 +673,7 @@ function seedSegmentsFromRaw(raw: string): Segment[] {
 }
 
 function buildSummary(claim: Claim, status: RunStatus | undefined) {
-  const current = status ?? { run_id: "", status: "idle" };
+  const current = status ?? { run_id: "", status: "idle", diffs: [] };
   const bullets: string[] = [];
   let headline = "Awaiting validation.";
 
@@ -988,8 +1004,8 @@ export default function Page() {
       if (!snapshot) continue;
       completedUnits += snapshot.unitsCompleted;
       totalUnits += snapshot.unitsTotal;
-      if (snapshot.etaSeconds !== undefined) {
-        etaSeconds = etaSeconds === undefined ? snapshot.etaSeconds : Math.max(etaSeconds, snapshot.etaSeconds ?? 0);
+      if (snapshot.etaSeconds != null) {
+        etaSeconds = etaSeconds === undefined ? snapshot.etaSeconds : Math.max(etaSeconds, snapshot.etaSeconds);
       }
     }
 
@@ -1485,13 +1501,58 @@ export default function Page() {
               if (scoped.length <= 1) {
                 return [] as Array<typeof scoped[number] & { width: number }>;
               }
-              const maxRate = Math.max(...scoped.map((item) => item.rate ?? 0));
               return scoped.map((item) => ({
                 ...item,
-                width: maxRate > 0 ? Math.max(8, Math.round(((item.rate ?? 0) / maxRate) * 100)) : 0,
+                width: Math.max(6, Math.round(Math.max(0, Math.min(item.rate ?? 0, 1)) * 100)),
               }));
             })();
-            const diffEntries = rawDiffs
+
+            const taskBreakdown = (() => {
+              const entry = rawDiffs.find(
+                (diff) => typeof diff.reason === "string" && diff.reason.toLowerCase() === "task_breakdown"
+              );
+              if (!entry || typeof entry !== "object") return null;
+              const tasks = Array.isArray(entry.tasks) ? entry.tasks : [];
+              const insights = typeof entry.insights === "object" && entry.insights ? entry.insights : {};
+              if (!tasks.length) return null;
+              return {
+                tasks: tasks.map((task: any) => ({
+                  id: typeof task.task === "string" ? task.task : String(task.task ?? "task"),
+                  baseline: task.baseline || {},
+                  comparators: Array.isArray(task.comparators) ? task.comparators : [],
+                })),
+                insights,
+              } as TaskBreakdownInfo;
+            })();
+            const insightData = taskBreakdown?.insights as Record<string, unknown> | undefined;
+            const baselineMisses = insightData && Array.isArray(insightData["baseline_failed_tasks"])
+              ? (insightData["baseline_failed_tasks"] as string[])
+              : [];
+            const sharedFailures = insightData && Array.isArray(insightData["all_models_failed_tasks"])
+              ? (insightData["all_models_failed_tasks"] as string[])
+              : [];
+            const baselineOnlyPassTasks = insightData && Array.isArray(insightData["baseline_only_pass_tasks"])
+              ? (insightData["baseline_only_pass_tasks"] as string[])
+              : [];
+
+            const failureSummary: FailureSummaryInfo | null = (() => {
+              const entry = rawDiffs.find(
+                (diff) => typeof diff.reason === "string" && diff.reason.toLowerCase() === "failure_summary"
+              );
+              if (!entry || typeof entry !== "object") return null;
+              const baseline = Array.isArray(entry.baseline)
+                ? (entry.baseline as FailureReasonEntry[])
+                : [];
+              const comparators = Array.isArray(entry.comparators)
+                ? (entry.comparators as FailureReasonEntry[])
+                : [];
+              return { baseline, comparators };
+            })();
+
+            const comparisonDeficitNote = rawDiffs.find(
+              (diff) => typeof diff.reason === "string" && diff.reason.toLowerCase() === "comparison_deficit"
+            );
+            const diffEntries = (rawDiffs
               .map((diff) => {
                 if (!diff) return null;
                 if (typeof diff !== "object") {
@@ -1501,7 +1562,14 @@ export default function Page() {
 
                 const rawReason = typeof diff.reason === "string" ? diff.reason : undefined;
                 const reasonKey = rawReason?.toLowerCase();
-                if (reasonKey === "metrics" || reasonKey === "ops" || reasonKey === "artifacts") {
+                if (
+                  reasonKey === "metrics" ||
+                  reasonKey === "ops" ||
+                  reasonKey === "artifacts" ||
+                  reasonKey === "baseline" ||
+                  reasonKey === "comparator" ||
+                  reasonKey === "task_breakdown"
+                ) {
                   return null;
                 }
 
@@ -1539,15 +1607,6 @@ export default function Page() {
                   return parts.length ? parts.join(" · ") : undefined;
                 };
 
-                if ((reasonKey === "baseline" || reasonKey === "comparator") && !message) {
-                  message = formatPassDetails();
-                } else if (reasonKey === "comparator" || reasonKey === "baseline") {
-                  const extras = formatPassDetails();
-                  if (extras) {
-                    message = `${message ?? ""}${message ? ": " : ""}${extras}`;
-                  }
-                }
-
                 if (message) {
                   return { reason: rawReason, message };
                 }
@@ -1573,7 +1632,7 @@ export default function Page() {
 
                 return formatted ? { reason: rawReason, message: formatted } : null;
               })
-              .filter((entry): entry is { reason?: string; message: string } => Boolean(entry?.message));
+              .filter((entry) => Boolean(entry?.message)) as Array<{ message: string; reason?: string }>);
             const shareFooterItems = [claim.domain, claim.task].filter(Boolean);
             const validationCount = resolveValidationCount(status, claim);
             const formattedValidationCount = validationCount.toLocaleString();
@@ -1681,15 +1740,106 @@ export default function Page() {
                               <div className="share-compare-bar">
                                 <div className="share-compare-fill" style={{ width: `${item.width}%` }} />
                               </div>
-                              <div className="share-compare-meta">
-                                {attempts && <span>{attempts}</span>}
-                                {latency && <span>{latency}</span>}
-                              </div>
+                             <div className="share-compare-meta">
+                               {attempts && <span>{attempts}</span>}
+                               {latency && <span>{latency}</span>}
+                             </div>
                             </div>
                           );
                         })}
                       </div>
                     )}
+
+                    {taskBreakdown && (
+                      <div className="task-breakdown" role="group" aria-label="Task-level outcomes">
+                        <div className="task-breakdown-headline">Task-level outcomes</div>
+                        <div className="task-breakdown-summary">
+                          <span>
+                            Baseline missed {baselineMisses.length}/{competitionStats[0]?.attempted ?? 12} tasks
+                          </span>
+                          <span>Shared failures {sharedFailures.length}</span>
+                        </div>
+                        {baselineMisses.length ? (
+                          <div className="task-breakdown-insight">Baseline failed but comparators passed: {baselineMisses.join(", ")}</div>
+                        ) : null}
+                        {baselineOnlyPassTasks.length ? (
+                          <div className="task-breakdown-insight">Only baseline passed: {baselineOnlyPassTasks.join(", ")}</div>
+                        ) : null}
+                        {sharedFailures.length ? (
+                          <div className="task-breakdown-insight">All models failed: {sharedFailures.join(", ")}</div>
+                        ) : null}
+                        <div className="task-breakdown-grid">
+                          {taskBreakdown.tasks.map((task) => {
+                            const baselineSuccess = Boolean(task.baseline?.success);
+                            const prettyId = task.id.replace(/_/g, " ");
+                            return (
+                              <div key={task.id} className="task-breakdown-item">
+                                <div className="task-breakdown-label">{prettyId}</div>
+                                <div className="task-breakdown-statuses">
+                                  <span
+                                    className={`task-status-dot ${baselineSuccess ? "is-pass" : "is-fail"}`}
+                                    title={`Baseline ${baselineSuccess ? "passed" : "failed"}`}
+                                  >
+                                    B
+                                  </span>
+                                  {task.comparators.map((comp: any, compIdx: number) => {
+                                    const symbol = (comp.model ?? "C").slice(0, 1).toUpperCase();
+                                    return (
+                                      <span
+                                        key={`${task.id}-${comp.model ?? compIdx}`}
+                                        className={`task-status-dot ${comp.success ? "is-pass" : "is-fail"}`}
+                                        title={`${comp.model ?? "Comparator"} ${comp.success ? "passed" : "failed"}`}
+                                      >
+                                        {symbol}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                                {!baselineSuccess && typeof task.baseline?.stderr === "string" && task.baseline.stderr ? (
+                                  <div className="task-breakdown-note">{task.baseline.stderr.slice(0, 140)}</div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {failureSummary && (
+                      <div className="failure-summary" role="group" aria-label="Failure reasons">
+                        <div className="failure-summary-headline">Frequent failure reasons</div>
+                        <div className="failure-summary-sections">
+                          <div className="failure-summary-section">
+                            <div className="failure-summary-title">Baseline</div>
+                            <ul>
+                              {failureSummary.baseline.length
+                                ? failureSummary.baseline.map((entry) => (
+                                    <li key={`baseline-${entry.reason}`}>{entry.reason}: {entry.count}</li>
+                                  ))
+                                : <li>No failures</li>}
+                            </ul>
+                          </div>
+                          <div className="failure-summary-section">
+                            <div className="failure-summary-title">Comparators</div>
+                            <ul>
+                              {failureSummary.comparators.length
+                                ? failureSummary.comparators.map((entry) => (
+                                    <li key={`comparator-${entry.reason}`}>{entry.reason}: {entry.count}</li>
+                                  ))
+                                : <li>No failures</li>}
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {comparisonDeficitNote ? (
+                      <div className="comparison-note" role="note">
+                        {typeof comparisonDeficitNote.message === "string"
+                          ? comparisonDeficitNote.message
+                          : JSON.stringify(comparisonDeficitNote)}
+                      </div>
+                    ) : null}
 
                     {status && diffEntries.length > 0 && (
                       <ul className="diff-list">
@@ -2308,6 +2458,139 @@ export default function Page() {
           gap: 2px;
           font-size: 0.78rem;
           color: rgba(226, 232, 240, 0.78);
+        }
+
+        .task-breakdown {
+          margin-top: 16px;
+          padding: 16px;
+          border-radius: 14px;
+          background: rgba(15, 23, 42, 0.55);
+          border: 1px solid rgba(248, 250, 252, 0.12);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .task-breakdown-headline {
+          font-weight: 600;
+          font-size: 0.95rem;
+          color: rgba(248, 250, 252, 0.88);
+        }
+
+        .task-breakdown-summary {
+          display: flex;
+          gap: 18px;
+          flex-wrap: wrap;
+          font-size: 0.8rem;
+          color: rgba(226, 232, 240, 0.75);
+        }
+
+        .task-breakdown-insight {
+          font-size: 0.78rem;
+          color: rgba(226, 232, 240, 0.68);
+        }
+
+        .task-breakdown-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+        }
+
+        .task-breakdown-item {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 12px;
+          border-radius: 10px;
+          background: rgba(12, 19, 31, 0.45);
+          border: 1px solid rgba(148, 163, 184, 0.16);
+        }
+
+        .task-breakdown-label {
+          font-size: 0.85rem;
+          font-weight: 600;
+          color: rgba(248, 250, 252, 0.85);
+          text-transform: capitalize;
+        }
+
+        .task-breakdown-statuses {
+          display: flex;
+          gap: 6px;
+        }
+
+        .task-status-dot {
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 0.7rem;
+          font-weight: 600;
+          color: rgba(11, 15, 20, 0.9);
+        }
+
+        .task-status-dot.is-pass {
+          background: rgba(34, 197, 94, 0.85);
+        }
+
+        .task-status-dot.is-fail {
+          background: rgba(239, 68, 68, 0.85);
+        }
+
+        .task-breakdown-note {
+          font-size: 0.72rem;
+          color: rgba(226, 232, 240, 0.7);
+        }
+
+        .failure-summary {
+          margin-top: 16px;
+          padding: 16px;
+          border-radius: 14px;
+          background: rgba(16, 24, 40, 0.55);
+          border: 1px solid rgba(148, 163, 184, 0.16);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .failure-summary-headline {
+          font-weight: 600;
+          font-size: 0.95rem;
+          color: rgba(248, 250, 252, 0.88);
+        }
+
+        .failure-summary-sections {
+          display: flex;
+          gap: 24px;
+          flex-wrap: wrap;
+        }
+
+        .failure-summary-section ul {
+          list-style: none;
+          padding-left: 0;
+          margin: 6px 0 0;
+        }
+
+        .failure-summary-section li {
+          font-size: 0.78rem;
+          color: rgba(226, 232, 240, 0.75);
+        }
+
+        .failure-summary-title {
+          font-size: 0.82rem;
+          font-weight: 600;
+          color: rgba(248, 250, 252, 0.85);
+        }
+
+        .comparison-note {
+          margin-top: 14px;
+          padding: 10px 14px;
+          border-radius: 10px;
+          background: rgba(236, 72, 153, 0.15);
+          border: 1px solid rgba(236, 72, 153, 0.35);
+          font-size: 0.85rem;
+          color: rgba(252, 231, 243, 0.92);
         }
 
         .diff-list li {

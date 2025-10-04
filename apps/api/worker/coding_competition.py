@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,9 +27,13 @@ except ImportError:  # pragma: no cover
     genai = None  # type: ignore
 
 try:
-    from openai import OpenAI
+    from openai import BadRequestError, OpenAI
 except ImportError:  # pragma: no cover
     OpenAI = None  # type: ignore
+
+    class BadRequestError(Exception):  # type: ignore
+        """Fallback error type when openai library is unavailable."""
+
 
 from .logging_utils import get_logger
 
@@ -142,17 +147,36 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
             raise CodingBenchError("OPENAI_API_KEY not configured")
         client = OpenAI(api_key=api_key)
         t0 = time.time()
-        extra_kwargs: Dict[str, Any] = {}
+        responses_extra: Dict[str, Any] = {}
+        chat_extra: Dict[str, Any] = {}
         if isinstance(name, str) and name.startswith("gpt-5"):
-            extra_kwargs["reasoning"] = {"effort": "low"}
-            extra_kwargs["text"] = {"verbosity": "low"}
+            effort = "high" if "thinking" in name else "medium"
+            responses_extra["reasoning"] = {"effort": effort}
+            responses_extra["text"] = {"verbosity": "high"}
+        effective_temperature = temperature if (temperature is not None and temperature > 0.0) else None
+
+        def _request_with_fallback(func, *, temperature_value: Optional[float], **params):
+            request_params = dict(params)
+            if temperature_value is not None:
+                request_params["temperature"] = temperature_value
+            try:
+                return func(**request_params)
+            except BadRequestError as err:  # pragma: no cover - requires specific provider response
+                if temperature_value is not None:
+                    message = str(getattr(err, "message", err)).lower()
+                    if "temperature" in message and "unsupported" in message:
+                        request_params.pop("temperature", None)
+                        return func(**request_params)
+                raise
+
         if hasattr(client, "responses"):
-            response = client.responses.create(
+            response = _request_with_fallback(
+                client.responses.create,
+                temperature_value=effective_temperature,
                 model=name,
                 input=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_output_tokens=2048,
-                **extra_kwargs,
+                max_output_tokens=4096,
+                **responses_extra,
             )
             latency = time.time() - t0
             text = "".join(part.text for part in response.output_text)
@@ -160,14 +184,19 @@ def _call_model(config: Dict[str, Any], prompt: str, temperature: float) -> Mode
             input_tokens = int(getattr(usage, "input_tokens", 0))
             output_tokens = int(getattr(usage, "output_tokens", 0))
         else:
-            chat = client.chat.completions.create(
-                model=name,
-                messages=[
+            request_kwargs: Dict[str, Any] = {
+                "model": name,
+                "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=temperature,
-                max_tokens=2048,
+                "max_completion_tokens": 4096,
+            }
+            request_kwargs.update(chat_extra)
+            chat = _request_with_fallback(
+                client.chat.completions.create,
+                temperature_value=effective_temperature,
+                **request_kwargs,
             )
             latency = time.time() - t0
             text = "".join(choice.message.content or "" for choice in getattr(chat, "choices", []) or [])
@@ -268,7 +297,7 @@ def _run_tests(task: Dict[str, Any], solution: str) -> TaskResult:
     if not tests:
         raise CodingBenchError(f"Task {task.get('id')} missing tests")
     with tempfile.TemporaryDirectory() as td:
-        source = _extract_python_code(solution)
+        source = textwrap.dedent(_extract_python_code(solution))
         path = Path(td) / "solution.py"
         path.write_text(source, encoding="utf-8")
         setup = [
@@ -313,7 +342,7 @@ def _run_tests(task: Dict[str, Any], solution: str) -> TaskResult:
                 checks.extend(
                     [
                         f"{result_var} = {expr}",
-                        f"assert repr({result_var}) == {expected!r}, f\"Expected {expected!r}, got {{repr({result_var})}}\"",
+                        f"assert repr({result_var}) == {expected!r}",
                     ]
                 )
         script = "\n".join([*setup, *checks])

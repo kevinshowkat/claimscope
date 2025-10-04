@@ -11,6 +11,10 @@ cp .env.example .env  # update provider key refs if needed
 docker compose up --build
 # open http://localhost:3000
 
+# after changing API/worker code, rebuild running containers
+docker compose build api worker
+docker compose up -d api worker
+
 # optional: hot reload UI locally
 docker compose stop web
 cd apps/web && npm install && npm run dev

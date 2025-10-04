@@ -24,11 +24,24 @@ def test_extract_comparators_handles_such_as_phrases():
     assert "GPT-4o" in comparators
 
 
+def test_extract_comparators_handles_unicode_hyphen():
+    raw = "OpenAI’s GPT‑5 beats GPT‑4o, GPT‑5 mini, and Claude Sonnet 4 across coding."
+    comparators = _extract_comparators(raw)
+    assert any("GPT-4o" in value for value in comparators)
+    assert any("Claude Sonnet 4" in value for value in comparators)
+
+
 def test_detect_primary_model_prefers_named_model_variant():
     raw = "The Llama 3.2 11B Vision model is a drop-in replacement for text equivalents."
     detected = _detect_primary_model(raw)
     assert detected is not None
     assert detected.lower().startswith("llama 3.2")
+
+
+def test_detect_primary_model_handles_unicode_hyphen():
+    raw = "OpenAI’s GPT‑5 beats GPT‑4o across coding benchmarks."
+    detected = _detect_primary_model(raw)
+    assert detected == "GPT-5"
 
 
 def test_extract_model_mentions_picks_multiple_models():
@@ -37,6 +50,13 @@ def test_extract_model_mentions_picks_multiple_models():
     assert "Claude Opus 4" in mentions
     assert "GPT-4o" in mentions
     assert any(name.lower().startswith("gpt-5") for name in mentions)
+
+
+def test_extract_model_mentions_handles_unicode_hyphen():
+    raw = "OpenAI’s GPT‑5 beats GPT‑4o and GPT‑5 mini across coding suites."
+    mentions = _extract_model_mentions(raw)
+    assert any(name.startswith("GPT-5") for name in mentions)
+    assert "GPT-4o" in mentions
 
 
 @pytest.mark.parametrize(
@@ -97,7 +117,9 @@ def test_resolve_comparator_models_keeps_names_without_credentials(monkeypatch):
     )
     assert "GPT-4o" in names
     assert any(label.startswith("GPT-5") for label in names)
-    assert configs == []
+    assert all(cfg["provider"] == "anthropic" for cfg in configs)
+    assert all(cfg["name"].startswith("claude") for cfg in configs)
+    assert all(cfg.get("api_key_ref") == "ANTHROPIC_API_KEY" for cfg in configs)
 
 
 def test_resolve_comparator_models_handles_gpt5_alias(monkeypatch):
@@ -109,6 +131,22 @@ def test_resolve_comparator_models_handles_gpt5_alias(monkeypatch):
     )
     assert any(label.lower().startswith("gpt-5") for label in names)
     assert configs and configs[0]["name"].startswith("gpt-5")
+
+
+def test_resolve_comparator_models_reuses_primary_provider_credentials(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    names, configs = _resolve_comparator_models(
+        "GPT-5",
+        ["GPT-4o", "GPT-5 mini"],
+        include_defaults=False,
+    )
+    assert "GPT-4o" in names
+    assert "GPT-5 mini" in names
+    model_map = {cfg["name"]: cfg for cfg in configs}
+    assert "gpt-4o" in model_map
+    assert "gpt-5-mini" in model_map
+    assert model_map["gpt-4o"].get("api_key_ref") == "OPENAI_API_KEY"
+    assert model_map["gpt-5-mini"].get("api_key_ref") == "OPENAI_API_KEY"
 
 
 def test_resolve_comparator_models_falls_back_to_unknown_labels():

@@ -62,6 +62,13 @@ VISION_MARKERS = (
 )
 
 
+_HYPHEN_NORMALIZE_RE = re.compile(r"[‐‑‒–—−]")
+
+
+def _normalize_hyphen_variants(text: str) -> str:
+    return _HYPHEN_NORMALIZE_RE.sub("-", text)
+
+
 def _normalize_model_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip()).lower()
 
@@ -77,14 +84,36 @@ MODEL_NAME_PATTERNS = [
 ]
 
 
+_GPT_SUFFIXES = [
+    "thinking",
+    "mini",
+    "thinking mini",
+    "nano",
+    "thinking nano",
+]
+
+
 def _extract_model_mentions(text: str) -> List[str]:
-    mentions: List[str] = []
+    normalized = _normalize_hyphen_variants(text)
+    hits: Dict[str, Tuple[int, str]] = {}
     for pattern in MODEL_NAME_PATTERNS:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+        for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
             value = re.sub(r"\s+", " ", match.group(0).strip())
-            if value and value not in mentions:
-                mentions.append(value)
-    return mentions
+            if not value:
+                continue
+            if value.lower().startswith("gpt-"):
+                suffix_space = normalized[match.end():]
+                for suffix in _GPT_SUFFIXES:
+                    if suffix_space.lower().startswith(f" {suffix}"):
+                        value = f"{value} {suffix}".strip()
+                        break
+            norm = _normalize_model_name(value)
+            start = match.start()
+            existing = hits.get(norm)
+            if existing is None or start < existing[0]:
+                hits[norm] = (start, value)
+    ordered = sorted(hits.values(), key=lambda item: item[0])
+    return [value for _, value in ordered]
 
 
 _MODEL_REGISTRY: List[Dict[str, Any]] = [
@@ -117,6 +146,19 @@ _MODEL_REGISTRY: List[Dict[str, Any]] = [
             "gpt 5 thinking",
         ],
         "variants": ["gpt-5", "gpt-5-thinking", "gpt-5-chat-latest"],
+        "default_compare": True,
+    },
+    {
+        "display": "GPT-5 thinking",
+        "provider": "openai",
+        "model": os.getenv("CLAIMSCOPE_MODEL_GPT5_THINKING", "gpt-5-thinking"),
+        "env": "OPENAI_API_KEY",
+        "aliases": [
+            "gpt-5 thinking",
+            "gpt 5 thinking",
+            "gpt-5-thinking",
+        ],
+        "variants": ["gpt-5-thinking", "gpt-5-thinking-latest"],
         "default_compare": True,
     },
     {
@@ -352,9 +394,11 @@ def _resolve_comparator_models(
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     primary_entry = _lookup_model_entry(primary)
     primary_key = None
+    primary_provider: Optional[str] = None
     if primary_entry:
         primary_model_name = _pick_model_identifier(primary_entry) or primary_entry["model"]
         primary_key = (primary_entry["provider"], primary_model_name)
+        primary_provider = primary_entry.get("provider")
 
     resolved_names: List[str] = []
     resolved_configs: List[Dict[str, Any]] = []
@@ -381,13 +425,15 @@ def _resolve_comparator_models(
                 _add_display(display_name)
             env_var = entry.get("env")
             has_credentials = not env_var or os.getenv(env_var)
+            if not has_credentials and primary_provider and entry.get("provider") == primary_provider:
+                has_credentials = True
             if not has_credentials:
                 return
             if key in seen_keys:
                 return
             seen_keys.add(key)
             config: Dict[str, Any] = {"provider": entry["provider"], "name": chosen_model}
-            api_key_ref = entry.get("api_key_ref")
+            api_key_ref = entry.get("api_key_ref") or env_var
             if api_key_ref:
                 config["api_key_ref"] = api_key_ref
             resolved_configs.append(config)
@@ -416,8 +462,9 @@ def _contains_comparative_language(text: str) -> bool:
 
 
 def _extract_comparators(text: str) -> List[str]:
+    normalized = _normalize_hyphen_variants(text)
     candidates: List[str] = []
-    lowered = text.lower()
+    lowered = normalized.lower()
 
     patterns = [
         r"compared to\s+([^.;]+)",
@@ -427,7 +474,7 @@ def _extract_comparators(text: str) -> List[str]:
         r"such as\s+([^.;]+)",
     ]
     for pattern in patterns:
-        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        matches = re.findall(pattern, normalized, flags=re.IGNORECASE)
         for match in matches:
             tokens = re.split(r",|\/| and | or |;", match)
             for token in tokens:
@@ -443,7 +490,7 @@ def _extract_comparators(text: str) -> List[str]:
 
     # Handle cases like "closed models, such as ..." by ensuring we captured capitalised words
     if not candidates:
-        capitalised = re.findall(r"([A-Z][A-Za-z0-9\- ]{2,})", text)
+        capitalised = re.findall(r"([A-Z][A-Za-z0-9\- ]{2,})", normalized)
         for candidate in capitalised:
             if candidate.lower() in lowered:
                 if candidate.lower() in lowered and candidate not in candidates:
@@ -455,7 +502,8 @@ def _extract_comparators(text: str) -> List[str]:
 def _extract_percentage_near(text: str, keywords: List[str]) -> Optional[float]:
     if not keywords:
         return None
-    lowered = text.lower()
+    normalized = _normalize_hyphen_variants(text)
+    lowered = normalized.lower()
     keyword_ranges: List[Tuple[int, int]] = []
     for keyword in keywords:
         pattern = re.escape(keyword.lower())
@@ -465,7 +513,7 @@ def _extract_percentage_near(text: str, keywords: List[str]) -> Optional[float]:
         return None
 
     best: Optional[Tuple[int, float]] = None
-    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*%", text):
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*%", normalized):
         mid = (match.start() + match.end()) // 2
         for start, end in keyword_ranges:
             if start <= mid <= end:
@@ -488,11 +536,12 @@ def _extract_percentage_near(text: str, keywords: List[str]) -> Optional[float]:
 
 
 def _extract_percentage_range(text: str, keywords: List[str]) -> Optional[Tuple[float, float]]:
-    lowered = text.lower()
+    normalized = _normalize_hyphen_variants(text)
+    lowered = normalized.lower()
     if not keywords:
         return None
     pattern = r"(\d+(?:\.\d+)?)\s*[-\u2013]\s*(\d+(?:\.\d+)?)\s*%"
-    for match in re.finditer(pattern, text):
+    for match in re.finditer(pattern, normalized):
         start, end = match.span()
         window = lowered[max(0, start - 64): min(len(lowered), end + 64)]
         if any(keyword in window for keyword in keywords):
@@ -508,7 +557,8 @@ def _extract_percentage_range(text: str, keywords: List[str]) -> Optional[Tuple[
 
 
 def _extract_capabilities(text: str) -> List[str]:
-    lowered = text.lower()
+    normalized = _normalize_hyphen_variants(text)
+    lowered = normalized.lower()
     patterns = [
         r"(?:including|across|such as)\s+([^.;]+)",
         r"(?:covering|spanning)\s+([^.;]+)",
@@ -516,7 +566,7 @@ def _extract_capabilities(text: str) -> List[str]:
     for pattern in patterns:
         match = re.search(pattern, lowered)
         if match:
-            fragment = text[match.start(1):match.end(1)]
+            fragment = normalized[match.start(1):match.end(1)]
             parts = re.split(r",| and | & |/", fragment)
             cleaned = []
             for part in parts:
@@ -558,7 +608,9 @@ def submit_claim(body: SubmitClaimRequest):
         raise HTTPException(status_code=400, detail="Provide raw_text or url")
 
     # Simple keyword-based parsing for demo presets, allow multiple claims
-    raw = (body.raw_text or "").lower()
+    source_text = body.raw_text or ""
+    normalized_text = _normalize_hyphen_variants(source_text)
+    raw = normalized_text.lower()
     source_url = body.url
 
     candidates = []
@@ -578,7 +630,7 @@ def submit_claim(body: SubmitClaimRequest):
             local_settings.pop("requires_multimodal_harness")
         candidates.append(
             {
-                "model": model_hint or _detect_primary_model(body.raw_text or "") or "Unspecified Model",
+                "model": model_hint or _detect_primary_model(source_text) or "Unspecified Model",
                 "domain": domain,
                 "task": task,
                 "metric": metric,
@@ -588,8 +640,8 @@ def submit_claim(body: SubmitClaimRequest):
             }
         )
 
-    primary_model = _detect_primary_model(body.raw_text or "")
-    model_mentions = _extract_model_mentions(body.raw_text or "")
+    primary_model = _detect_primary_model(source_text)
+    model_mentions = _extract_model_mentions(source_text)
     if primary_model is None and model_mentions:
         primary_model = model_mentions[0]
 
