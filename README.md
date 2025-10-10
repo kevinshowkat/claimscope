@@ -1,12 +1,12 @@
-# Claimscope — Labs Edition
+# Eval Receipts — Labs Edition
 
-Claimscope ingests AI-lab evaluation claims, reproduces them with pinned, open harnesses, and publishes a shareable receipt per claim with a neutral status: Replicated / Setting Drift / Underspecified / Not Reproduced.
+Eval Receipts ingests AI-lab evaluation claims, reproduces them with pinned, open harnesses, and publishes a shareable receipt per claim with a neutral status: Replicated / Setting Drift / Underspecified / Not Reproduced.
 
 ## One-command local repro
 
 ```bash
-git clone https://github.com/claimscope/claimscope
-cd claimscope
+git clone https://github.com/kevinshowkat/eval-receipts
+cd eval-receipts
 cp .env.example .env  # update provider key refs if needed
 docker compose up --build
 # open http://localhost:3000
