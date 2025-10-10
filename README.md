@@ -2,6 +2,9 @@
 
 Eval Receipts ingests AI-lab evaluation claims, reproduces them with pinned, open harnesses, and publishes a shareable receipt per claim with a neutral status: Replicated / Setting Drift / Underspecified / Not Reproduced.
 
+![Eval Receipts verdict marking a claim as likely exaggerated](docs/assets/receipt.png)
+
+
 ## One-command local repro
 
 ```bash
